@@ -1,0 +1,13 @@
+.tools/
+node_modules/
+dist/
+frontend/public/models/
+frontend/public/vendor/
+frontend/public/fixtures/
+frontend/test-harness.html
+.env
+.env.*
+!.env.example
+*.log
+*.pcap
+*.pcapng
