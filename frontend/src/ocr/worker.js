@@ -1,4 +1,5 @@
 import * as ort from "onnxruntime-web/webgpu";
+import { loadBinaryResource } from "./resources.ts";
 import {
   splitLines,
   cropWithBorder,
@@ -14,46 +15,83 @@ let session,
   lastSize,
   lastRun = -Infinity,
   baseUrl;
-async function init(preferred = "webgpu") {
-  if (session) return { provider };
+async function init(preferred = "webgpu", report = () => {}) {
+  if (session) return { provider, cacheHit: true };
   if (initializing) return initializing;
   initializing = (async () => {
-    ort.env.wasm.wasmPaths = new URL("vendor/ort/", baseUrl).href;
     ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
-    const start = performance.now(),
-      config = await (
-        await fetch(new URL("models/model.json", baseUrl))
-      ).json();
-    characters = await (
-      await fetch(new URL("models/" + config.characters, baseUrl))
-    ).json();
-    const cache = await caches.open("qqsg-models-v1"),
-      key = new URL(
+    const start = performance.now();
+    report({ stage: "configuration", label: "读取识别配置", loaded: 0 });
+    const configResponse = await fetch(new URL("models/model.json", baseUrl));
+    if (!configResponse.ok) throw Error("无法加载识别配置，请刷新页面重试");
+    const config = await configResponse.json();
+    const warnings = [];
+    const dictionary = await loadBinaryResource({
+      url: new URL("models/" + config.characters, baseUrl).href,
+      label: "字典",
+      cacheKey: new URL(
+        "models/" + config.characters + "?model=" + config.sha256,
+        baseUrl,
+      ).href,
+      sha256:
+        config.charactersSha256 ??
+        "e41e95fa4e12cc4e971e2ec4ab32a205a700056bc8a46e0803cd3f59f4d93dcf",
+      onProgress: report,
+    });
+    characters = JSON.parse(new TextDecoder().decode(dictionary.buffer));
+    if (
+      !Array.isArray(characters) ||
+      characters.length !== 18710 ||
+      characters.some((value) => typeof value !== "string")
+    )
+      throw Error("识别字典格式不正确，请重新准备资源");
+    warnings.push(...dictionary.warnings);
+    const model = await loadBinaryResource({
+      url: new URL("models/" + config.file, baseUrl).href,
+      label: "识别模型",
+      sha256: config.sha256,
+      cacheName: "qqsg-models-v1", // Reuse verified model bytes from the first deployed version.
+      cacheKey: new URL(
         "models/" + config.file + "?sha256=" + config.sha256,
         baseUrl,
-      ).href;
-    let response = await cache.match(key),
-      cacheHit = !!response;
-    if (!response) {
-      response = await fetch(new URL("models/" + config.file, baseUrl));
-      if (!response.ok) throw Error("模型下载失败");
-      await cache.put(key, response.clone());
-    }
-    const model = await response.arrayBuffer(),
-      hash = Array.from(
-        new Uint8Array(await crypto.subtle.digest("SHA-256", model)),
-        (b) => b.toString(16).padStart(2, "0"),
-      ).join("");
-    if (hash !== config.sha256) {
-      await cache.delete(key);
-      throw Error("模型校验不一致，请重新加载");
-    }
+      ).href,
+      onProgress: report,
+    });
+    warnings.push(...model.warnings);
+    // Supplying wasmBinary lets us show the actual runtime download instead of
+    // letting ONNX Runtime fetch a large invisible file during initialization.
+    const runtime = await loadBinaryResource({
+      url: new URL("vendor/ort/ort-wasm-simd-threaded.asyncify.wasm", baseUrl)
+        .href,
+      label: "识别运行库",
+      sha256:
+        "ca319e9539cd0f1e291cf56074760121eaf39650f5dbf84b6e52c07f4b2944ec",
+      cacheKey: new URL(
+        "vendor/ort/ort-wasm-simd-threaded.asyncify.wasm?v=1.31.1",
+        baseUrl,
+      ).href,
+      onProgress: report,
+    });
+    warnings.push(...runtime.warnings);
+    ort.env.wasm.wasmBinary = runtime.buffer;
+    ort.env.wasm.wasmPaths = {
+      mjs: new URL("vendor/ort/ort-wasm-simd-threaded.asyncify.mjs", baseUrl)
+        .href,
+    };
     const errors = [];
     for (const candidate of preferred === "wasm"
       ? ["wasm"]
       : ["webgpu", "wasm"]) {
+      report({
+        stage: "initializing",
+        label:
+          candidate === "webgpu"
+            ? "正在启动本机 GPU 识别"
+            : "正在启动本机 CPU 识别",
+        loaded: 0,
+      });
       try {
-        session = await ort.InferenceSession.create(model, {
+        session = await ort.InferenceSession.create(model.buffer, {
           executionProviders: [candidate],
           graphOptimizationLevel: "all",
         });
@@ -64,16 +102,29 @@ async function init(preferred = "webgpu") {
       }
     }
     if (!session) throw Error(errors.join("\n"));
+    report({
+      stage: "ready",
+      label: "本机识别已就绪",
+      loaded: 0,
+      cacheHit: model.cacheHit,
+    });
     return {
       provider,
       initializationMs: performance.now() - start,
       fallbackReasons: errors,
       threads: ort.env.wasm.numThreads,
-      cacheHit,
+      cacheHit: model.cacheHit,
+      runtimeCacheHit: runtime.cacheHit,
+      warnings,
     };
   })();
-  return initializing;
+  try {
+    return await initializing;
+  } finally {
+    if (!session) initializing = undefined;
+  }
 }
+
 function decode(output) {
   const data = output.data,
     classes = output.dims.at(-1),
@@ -115,11 +166,24 @@ async function recognize(input) {
 self.onmessage = async ({ data: m }) => {
   try {
     baseUrl = m.baseUrl;
+    let lastProgressAt = -Infinity;
+    const report = (progress) => {
+      const now = performance.now();
+      if (
+        progress.stage === "download" &&
+        progress.loaded &&
+        progress.loaded !== progress.total &&
+        now - lastProgressAt < 120
+      )
+        return;
+      lastProgressAt = now;
+      self.postMessage({ type: "progress", id: m.id, progress });
+    };
     if (m.type === "init") {
-      self.postMessage({ id: m.id, result: await init(m.provider) });
+      self.postMessage({ id: m.id, result: await init(m.provider, report) });
       return;
     }
-    await init(m.provider);
+    await init(m.provider, report);
     if (m.type === "exact") {
       const result = await recognize({
         data: new Float32Array(m.buffer),
@@ -167,6 +231,6 @@ self.onmessage = async ({ data: m }) => {
       },
     });
   } catch (e) {
-    self.postMessage({ id: m.id, error: e.stack || String(e) });
+    self.postMessage({ id: m.id, error: e.message || String(e) });
   }
 };

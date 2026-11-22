@@ -2,7 +2,8 @@ import "./style.css";
 import { renderShell, element as $, setText, notify } from "./view";
 import { selectWindow, createCrop } from "../capture/window";
 import { DurableRecorder } from "../capture/recorder";
-import { OcrClient } from "../ocr/client";
+import { OcrClient, type OcrProgress } from "../ocr/client";
+import { MessageArchive } from "../storage/message-archive";
 import { MessageMerger } from "../messages/merger";
 import * as store from "../storage/journal";
 import type { Rect, MergedMessage } from "../../../contracts/types";
@@ -29,6 +30,8 @@ let client: OcrClient | undefined,
   sessionGeneration = 0;
 const knownMessages = new Map<string, MergedMessage>();
 let releaseCaptureLease: (() => void) | undefined;
+let archive: MessageArchive | undefined;
+let sessionMessageIds = new Set<string>();
 const button = (id: string) => $<HTMLButtonElement>(id),
   checked = (id: string) => $<HTMLInputElement>(id).checked;
 const formatTime = (ms: number) =>
@@ -58,8 +61,10 @@ async function loadOcr() {
   if (loading) return loading;
   loading = (async () => {
     setText("ocr-status", "正在准备本机识别，首次需下载约 73 MB 模型…");
+    button("prepare-ocr").disabled = true;
+    $("ocr-preparation").hidden = false;
     button("retry-ocr").hidden = true;
-    const next = new OcrClient();
+    const next = new OcrClient({ onProgress: showOcrProgress });
     try {
       const info = await next.init();
       client = next;
@@ -69,8 +74,22 @@ async function loadOcr() {
           ? "识别已准备好 · 使用本机 GPU"
           : "识别已准备好 · 使用本机 CPU，速度可能较慢",
       );
+      $("ocr-preparation").hidden = true;
+      setText(
+        "ocr-resource-note",
+        (info.cacheHit ? "模型已从浏览器缓存读取。" : "模型已下载并校验。") +
+          (info.runtimeCacheHit ? "运行库已从缓存读取。" : "运行库已准备好。") +
+          (info.warnings?.length
+            ? " " + info.warnings.join("；")
+            : " 后续文字识别在本机完成。"),
+      );
+      setText("prepare-ocr", "识别已就绪");
     } catch (e) {
       next.close();
+      button("prepare-ocr").disabled = false;
+      setText("prepare-ocr", "重新准备识别");
+      setText("ocr-status", "识别准备失败，请重试；录像不受影响");
+      setText("ocr-progress-detail", describe(e));
       throw e;
     }
   })();
@@ -78,6 +97,47 @@ async function loadOcr() {
     await loading;
   } finally {
     loading = undefined;
+  }
+}
+function showOcrProgress(progress: OcrProgress) {
+  $("ocr-preparation").hidden = false;
+  const bar = $<HTMLProgressElement>("ocr-progress");
+  const mb = (n: number) => (n / 1024 / 1024).toFixed(1) + " MB";
+  if (progress.stage === "download") {
+    const percent = progress.total
+      ? Math.min(100, (progress.loaded / progress.total) * 100)
+      : undefined;
+    if (percent === undefined) bar.removeAttribute("value");
+    else bar.value = percent;
+    setText("ocr-status", `正在下载${progress.label}，录像可以继续`);
+    setText(
+      "ocr-progress-detail",
+      `${progress.label}：${mb(progress.loaded)}${progress.total ? " / " + mb(progress.total) + "（" + Math.floor(percent!) + "%）" : " · 总大小待确认"}`,
+    );
+  } else {
+    bar.removeAttribute("value");
+    const action =
+      progress.stage === "cache"
+        ? "检查本机缓存"
+        : progress.stage === "verify"
+          ? progress.cacheHit
+            ? "校验缓存"
+            : "下载完成，校验文件"
+          : progress.stage === "cache-write"
+            ? "校验通过，写入本机缓存"
+            : progress.label;
+    setText(
+      "ocr-status",
+      progress.stage === "initializing"
+        ? progress.label + "，请稍候"
+        : `${progress.label} · ${action}`,
+    );
+    setText(
+      "ocr-progress-detail",
+      progress.stage === "initializing"
+        ? "资源已准备，正在启动识别引擎；这不是继续下载。"
+        : `${progress.label}：${action}${progress.loaded ? " · " + mb(progress.loaded) : ""}`,
+    );
   }
 }
 async function tickOcr() {
@@ -104,7 +164,10 @@ async function tickOcr() {
       return;
     }
     const changes = current.ingest(result.lines, context);
+    archive?.update(changes);
+    for (const row of changes) sessionMessageIds.add(row.id);
     await store.saveMessages(changes);
+    if (token !== sessionGeneration) return;
     for (const row of changes) knownMessages.set(row.id, row);
     renderMessages();
     setText(
@@ -112,10 +175,13 @@ async function tickOcr() {
       `正在识别 · 最近一次 ${Math.round(result.elapsedMs)} 毫秒`,
     );
   } catch (e) {
+    if (token !== sessionGeneration) return;
     client?.close();
     client = undefined;
     setText("ocr-status", "识别暂不可用，视频录制继续");
     button("retry-ocr").hidden = false;
+    button("prepare-ocr").disabled = false;
+    setText("prepare-ocr", "重新准备识别");
     notify(`文字识别：${describe(e)}。录像不受影响，可点击重试识别。`, true);
     $<HTMLInputElement>("ocr-enabled").checked = false;
   } finally {
@@ -338,6 +404,36 @@ async function start() {
     });
     recorder = next;
     merger = new MessageMerger(next.sessionId);
+    const sessionArchive = new MessageArchive({
+      folder,
+      sessionId: next.sessionId,
+      startedAtMs: startedUtc,
+      onStatus: (event) => {
+        if (archive !== sessionArchive) return;
+        if (event.state === "saving")
+          setText("message-save-status", "正在保存本次文字…");
+        if (event.state === "saved" && event.result)
+          setText(
+            "message-save-status",
+            `已保存 ${event.result.count} 条文字 · ${new Date(event.result.savedAtMs).toLocaleTimeString()} · ${event.result.fileName}`,
+          );
+        if (event.state === "error")
+          setText(
+            "message-save-status",
+            "文字保存失败：" +
+              event.error +
+              "；视频录制不受影响，请点击立即保存重试。",
+          );
+      },
+    });
+    archive = sessionArchive;
+    sessionMessageIds = new Set();
+    archive.start();
+    button("save-messages").disabled = false;
+    setText(
+      "message-save-status",
+      "本次文字每分钟自动保存，停止时保存最后结果",
+    );
     await next.start();
     if (token !== sessionGeneration || recorder !== next) return;
     setText("record-state", "● 正在录制");
@@ -398,6 +494,16 @@ async function stop(hasError = false) {
     failure(e);
   } finally {
     try {
+      try {
+        const saved = await archive?.stop();
+        if (archive && !saved && !sessionMessageIds.size)
+          setText("message-save-status", "本次没有识别到消息，未生成文字文件");
+      } catch (e) {
+        setText(
+          "message-save-status",
+          "文字最终保存失败：" + describe(e) + "；可点击立即保存重试。",
+        );
+      }
       crop?.close();
     } finally {
       crop = undefined;
@@ -481,6 +587,28 @@ button("refresh").onclick = () => void refreshSegments().catch(failure);
 button("retry-ocr").onclick = () => {
   $<HTMLInputElement>("ocr-enabled").checked = true;
   void tickOcr();
+};
+button("prepare-ocr").onclick = () => void loadOcr().catch(failure);
+button("save-messages").onclick = async () => {
+  if (!archive) return;
+  button("save-messages").disabled = true;
+  try {
+    const result = await archive.flush();
+    if (!result)
+      setText(
+        "message-save-status",
+        sessionMessageIds.size
+          ? "没有新增或修订，已保存的文字文件保持不变"
+          : "本次还没有识别到可保存的文字，未生成文件",
+      );
+  } catch (e) {
+    setText(
+      "message-save-status",
+      "文字保存失败：" + describe(e) + "；可重试，视频录制不受影响。",
+    );
+  } finally {
+    button("save-messages").disabled = false;
+  }
 };
 $<HTMLInputElement>("ocr-enabled").onchange = () => {
   setText(

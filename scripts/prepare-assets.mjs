@@ -51,7 +51,14 @@ await writeFile(
 );
 await writeFile(
   resolve(target, "models/model.json"),
-  JSON.stringify(model, null, 2),
+  JSON.stringify(
+    {
+      ...model,
+      charactersSha256: hash(Buffer.from(JSON.stringify(characters))),
+    },
+    null,
+    2,
+  ),
 );
 const pkg = JSON.parse(
   await readFile(
