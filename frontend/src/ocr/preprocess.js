@@ -82,7 +82,13 @@ export function splitLines(image) {
     mask = signature(image),
     projection = new Float32Array(h);
   for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) projection[y] += mask[y * w + x];
+    for (let x = 0; x < w; x++) {
+      const p = (y * w + x) * 4;
+      // Dark scenery behind translucent chat is contrast-rich too. Only bright
+      // glyph cores vote for line segmentation; keep the original RGB crop.
+      if (Math.max(data[p], data[p + 1], data[p + 2]) >= 175)
+        projection[y] += mask[y * w + x];
+    }
   const active = Array.from(projection, (n) => (n >= 6 ? 1 : 0)),
     dil = active.map((_, y) =>
       Math.max(...active.slice(Math.max(0, y - 1), Math.min(h, y + 2))),
@@ -129,7 +135,7 @@ export function splitLines(image) {
     dropped = [];
   for (let i = 0; i < parts.length; i++) {
     let [t, b] = parts[i];
-    const edge = i < 3 || i >= parts.length - 3,
+    const edge = i === 0 || i === parts.length - 1,
       peak = Math.max(...projection.slice(t, b));
     const boundary = Math.max(
       t ? projection[t - 1] : peak,
@@ -137,7 +143,7 @@ export function splitLines(image) {
     );
     let reason = "";
     if (edge) {
-      if (i < 3 && t <= 1) reason = "top_capture_edge";
+      if (i === 0 && t <= 1) reason = "top_capture_edge";
       else if (b >= h - 1) reason = "bottom_capture_edge";
       else if (typical && (b - t < 0.65 * typical || b - t > 1.45 * typical))
         reason = "abnormal_line_height";

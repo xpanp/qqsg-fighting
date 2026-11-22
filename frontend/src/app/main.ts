@@ -4,7 +4,7 @@ import { selectWindow, createCrop } from "../capture/window";
 import { DurableRecorder } from "../capture/recorder";
 import { OcrClient, type OcrProgress } from "../ocr/client";
 import { MessageArchive } from "../storage/message-archive";
-import { MessageMerger } from "../messages/merger";
+import { MessageMerger, messageCandidates } from "../messages/merger";
 import * as store from "../storage/journal";
 import type { Rect, MergedMessage } from "../../../contracts/types";
 renderShell();
@@ -32,6 +32,9 @@ const knownMessages = new Map<string, MergedMessage>();
 let releaseCaptureLease: (() => void) | undefined;
 let archive: MessageArchive | undefined;
 let sessionMessageIds = new Set<string>();
+let ocrDevice = "识别引擎";
+const deviceName = (provider: string) =>
+  provider === "webgpu" ? "GPU" : "CPU";
 const button = (id: string) => $<HTMLButtonElement>(id),
   checked = (id: string) => $<HTMLInputElement>(id).checked;
 const formatTime = (ms: number) =>
@@ -68,6 +71,7 @@ async function loadOcr() {
     try {
       const info = await next.init();
       client = next;
+      ocrDevice = deviceName(info.provider);
       setText(
         "ocr-status",
         info.provider === "webgpu"
@@ -100,6 +104,15 @@ async function loadOcr() {
   }
 }
 function showOcrProgress(progress: OcrProgress) {
+  if (progress.stage === "recognizing") {
+    if (!recorder || !checked("ocr-enabled")) return;
+    $("ocr-preparation").hidden = true;
+    setText(
+      "ocr-status",
+      `${ocrDevice} · 正在识别 ${progress.completed ?? 0}/${progress.total ?? 0} 行 · ${Math.round(progress.elapsedMs ?? 0)} 毫秒`,
+    );
+    return;
+  }
   $("ocr-preparation").hidden = false;
   const bar = $<HTMLProgressElement>("ocr-progress");
   const mb = (n: number) => (n / 1024 / 1024).toFixed(1) + " MB";
@@ -160,19 +173,40 @@ async function tickOcr() {
     const result = await client!.recognize(image);
     if (token !== sessionGeneration || !checked("ocr-enabled")) return;
     if (result.skipped) {
-      setText("ocr-status", "画面未变 · 等待新消息");
+      setText("ocr-status", `${ocrDevice} · 画面未变 · 等待新消息`);
       return;
     }
+    ocrDevice = deviceName(result.provider);
     const changes = current.ingest(result.lines, context);
+    const textLineCount = result.lines.filter((line) =>
+      line.text.trim(),
+    ).length;
+    const added = changes.filter((row) => !knownMessages.has(row.id)).length;
+    const revised = changes.filter((row) => {
+      const previous = knownMessages.get(row.id);
+      return previous && row.revision > previous.revision;
+    }).length;
+    const candidates = messageCandidates(result.lines).length;
     archive?.update(changes);
     for (const row of changes) sessionMessageIds.add(row.id);
     await store.saveMessages(changes);
     if (token !== sessionGeneration) return;
     for (const row of changes) knownMessages.set(row.id, row);
     renderMessages();
+    $("ocr-preparation").hidden = true;
     setText(
       "ocr-status",
-      `正在识别 · 最近一次 ${Math.round(result.elapsedMs)} 毫秒`,
+      `${ocrDevice} · 读到 ${textLineCount} 行 · 新增 ${added} 条 · 修订 ${revised} 条 · ${Math.round(result.elapsedMs)} 毫秒`,
+    );
+    setText(
+      "ocr-diagnostics",
+      !textLineCount
+        ? `本帧处理 ${result.lines.length} 个候选行，但没有读到文字${result.diagnostics?.droppedLines ? `，另过滤了 ${result.diagnostics.droppedLines} 个边缘候选` : ""}；请检查选区是否包含清晰完整的聊天文字。`
+        : !candidates
+          ? "已读到文字，但频道开头或句子可能不完整，暂未整理成消息；并非识别引擎仍在等待。"
+          : !added && !revised
+            ? "本帧与已有消息重叠，没有新增或修订，不会重复刷入列表。"
+            : `已整理 ${candidates} 条候选消息，右侧已更新。`,
     );
   } catch (e) {
     if (token !== sessionGeneration) return;

@@ -62,3 +62,57 @@ test("cropping preserves visible RGB data without adding unrelated background", 
   assert.deepEqual(Array.from(output.data.slice(0, 4)), [255, 255, 0, 255]);
   assert.deepEqual(Array.from(output.data.slice(-4)), [255, 255, 0, 255]);
 });
+
+function chatTexture(color: number[], lines = [12, 33, 54, 75, 96]) {
+  const input = image(300, 126);
+  for (let y = 0; y < input.height; y++)
+    for (let x = 0; x < input.width; x++) {
+      const rgb =
+        (Math.floor(x / 3) + Math.floor(y / 3)) % 2
+          ? [155, 125, 75]
+          : [45, 70, 35];
+      input.data.set([...rgb, 255], (y * input.width + x) * 4);
+    }
+  for (const top of lines)
+    for (let y = Math.max(0, top); y < Math.min(input.height, top + 12); y++)
+      for (let x = 18; x < 260; x++)
+        if (x % 8 < 3)
+          input.data.set([...color, 255], (y * input.width + x) * 4);
+  return input;
+}
+
+test("bright chat glyphs on textured scenery retain five compact rows across text colors", () => {
+  for (const color of [
+    [255, 255, 0],
+    [240, 240, 240],
+    [0, 255, 40],
+    [255, 40, 220],
+    [0, 240, 255],
+  ]) {
+    const result = splitLines(chatTexture(color));
+    assert.equal(result.boxes.length, 5, `text color ${color}`);
+    assert.equal(result.dropped.length, 0);
+    assert.ok(result.boxes.every((box: number[]) => box[3] - box[1] <= 20));
+  }
+});
+
+test("cropped edge fragments are discarded while internal rows remain on textured background", () => {
+  const result = splitLines(chatTexture([255, 255, 0], [-6, 20, 48, 76, 121]));
+  assert.equal(result.boxes.length, 3);
+  assert.ok(
+    result.dropped.some(
+      (row: { reason: string }) => row.reason === "top_capture_edge",
+    ),
+  );
+  assert.ok(
+    result.dropped.some(
+      (row: { reason: string }) => row.reason === "bottom_capture_edge",
+    ),
+  );
+});
+
+test("small viewports keep complete first and last rows rather than treating all rows as clipped", () => {
+  const result = splitLines(chatTexture([0, 255, 255], [6, 37, 68, 100]));
+  assert.equal(result.boxes.length, 4);
+  assert.equal(result.dropped.length, 0);
+});

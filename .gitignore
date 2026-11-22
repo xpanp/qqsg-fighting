@@ -12,3 +12,4 @@ frontend/test-harness.html
 *.pcap
 *.pcapng
 frontend/test-usability.html
+frontend/test-delay.html

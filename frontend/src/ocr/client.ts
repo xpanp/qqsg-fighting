@@ -4,9 +4,17 @@ export interface OcrResult {
   skipped?: boolean;
   elapsedMs: number;
   lines: { text: string; box: number[]; confidence: number }[];
+  diagnostics?: { detectedLines: number; droppedLines: number };
 }
 export interface OcrProgress extends Omit<ResourceProgress, "stage"> {
-  stage: ResourceProgress["stage"] | "configuration" | "initializing" | "ready";
+  stage:
+    | ResourceProgress["stage"]
+    | "configuration"
+    | "initializing"
+    | "ready"
+    | "recognizing";
+  completed?: number;
+  elapsedMs?: number;
 }
 export interface OcrInfo {
   provider: string;

@@ -219,9 +219,25 @@ self.onmessage = async ({ data: m }) => {
           ? { boxes: [[0, 0, m.image.width, m.image.height]], dropped: [] }
           : splitLines(m.image),
       lines = [];
+    report({
+      stage: "recognizing",
+      label: "识别聊天文字",
+      completed: 0,
+      total: seg.boxes.length,
+      elapsedMs: 0,
+      loaded: 0,
+    });
     for (const box of seg.boxes) {
       const image = m.type === "line" ? m.image : cropWithBorder(m.image, box);
       lines.push({ ...(await recognize(tensorInput(image))), box });
+      report({
+        stage: "recognizing",
+        label: "识别聊天文字",
+        completed: lines.length,
+        total: seg.boxes.length,
+        elapsedMs: performance.now() - started,
+        loaded: 0,
+      });
     }
     self.postMessage({
       id: m.id,
@@ -229,6 +245,10 @@ self.onmessage = async ({ data: m }) => {
         provider,
         lines,
         dropped: seg.dropped,
+        diagnostics: {
+          detectedLines: seg.boxes.length,
+          droppedLines: seg.dropped.length,
+        },
         elapsedMs: performance.now() - started,
       },
     });
