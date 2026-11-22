@@ -10,14 +10,17 @@ const digest = async (bytes: Uint8Array) =>
 function cacheFixture(initial?: Response, fail = false) {
   let response = initial;
   const calls: string[] = [];
+  const keys: string[] = [];
   return {
     calls,
+    keys,
     storage: {
       async open() {
         if (fail) throw Error("cache disabled");
         return {
-          async match() {
+          async match(key: string) {
             calls.push("match");
+            keys.push(key);
             return response?.clone();
           },
           async delete() {
@@ -185,4 +188,42 @@ test("HTTP failure is not accepted as a model payload", async () => {
     }),
   );
   assert.equal(cache.calls.includes("put"), false);
+});
+
+test("external model URL reuses prior same-origin verified cache key", async () => {
+  const cache = cacheFixture(new Response(payload));
+  const oldKey = "https://example.test/fighting/models/model.onnx?sha256=known";
+  const output = await loadBinaryResource({
+    url: "https://www.modelscope.cn/models/example/model/resolve/v1/model.onnx",
+    cacheKey: oldKey,
+    cacheName: "qqsg-models-v1",
+    sha256: await digest(payload),
+    label: "model",
+    cacheStorage: cache.storage,
+    fetcher: async () => {
+      throw Error("cached model must not download again");
+    },
+  });
+  assert.equal(output.cacheHit, true);
+  assert.deepEqual(cache.keys, [oldKey]);
+});
+
+test("cold external download uses public URL with an independent cache key", async () => {
+  const cache = cacheFixture(),
+    urls: string[] = [];
+  const publicUrl =
+    "https://www.modelscope.cn/models/example/model/resolve/v1/model.onnx";
+  await loadBinaryResource({
+    url: publicUrl,
+    cacheKey: "https://example.test/fighting/models/model.onnx?sha256=known",
+    sha256: await digest(payload),
+    label: "model",
+    cacheStorage: cache.storage,
+    fetcher: async (input) => {
+      urls.push(String(input));
+      return streamedResponse(payload.length);
+    },
+  });
+  assert.deepEqual(urls, [publicUrl]);
+  assert.equal(cache.calls.includes("put"), true);
 });

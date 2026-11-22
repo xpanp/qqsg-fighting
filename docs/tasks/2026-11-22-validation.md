@@ -44,6 +44,14 @@ node node_modules/typescript/bin/tsc --noEmit
 
 真实浏览器下载进度、目录授权、实际写盘与部署后验证由主 Agent 执行并记录，当前本记录未将 Node 替身当作这些场景的通过证据。视频分段与时间元数据未因本轮测试被修改。
 
+## 模型公网下载调整复验
+
+2026-11-22 独立复验：新增 2 项外链资源回归后，全量 65 项通过，类型检查通过。新增用例确认：请求 URL 可以是公网 ModelScope，而缓存 key 继续使用旧同源地址；已有通过校验的缓存无需重新请求公网。
+
+只读检查确认当前 manifest 的 URL 固定在 RapidAI/RapidOCR 的 `v3.10.0` 路径，权重 SHA-256 与原版相同；Worker 从 `config.url` 请求权重，保持 `qqsg-models-v1` 和原同源 SHA 缓存 key。资源准备脚本不下载权重，只清理生成目录中哈希匹配的旧权重。
+
+检查当前 `dist/models` 只有模型配置与字典，没有 `.onnx`；递归 dist 也未发现 `.onnx`。产物大小仍包含 ONNX Web 运行库，不等同于权重大小。测试 Agent 独立构建因 `node_modules/.vite-temp` 写权限被拒而未执行成功；由协调者以其已授权的构建权限执行最终构建。公网跨域真实浏览器验证由协调者记录，单元测试不证明 CDN 的实际 CORS 或可用性。
+
 ## 主 Agent 浏览器实测
 
 Windows 内置 Chromium，本机 Vite 页面：

@@ -1,5 +1,5 @@
 /** Prepare reproducible local assets; no real recording or chat is needed. */
-import { readFile, writeFile, mkdir, copyFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, copyFile, unlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ const source =
   "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/";
 const model = {
   file: "PP-OCRv6_rec_medium.onnx",
+  url: source + "onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx",
   characters: "characters.json",
   sha256: "eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b",
   name: "PP-OCRv6_rec_medium",
@@ -29,11 +30,20 @@ async function checkedFile(file, url, expected) {
 }
 await mkdir(resolve(target, "models"), { recursive: true });
 await mkdir(resolve(target, "vendor/ort"), { recursive: true });
-await checkedFile(
-  resolve(target, "models", model.file),
-  source + "onnx/PP-OCRv6/rec/" + model.file,
-  model.sha256,
-);
+// Remove only the known generated weight from the previous same-origin build.
+// Vite copies every public file, so leaving it here would still ship 73 MiB.
+const legacyWeight = resolve(target, "models", model.file);
+let previousWeight;
+try {
+  previousWeight = await readFile(legacyWeight);
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+if (previousWeight) {
+  if (hash(previousWeight) !== model.sha256)
+    throw Error("Unexpected local weight; refusing to remove it");
+  await unlink(legacyWeight);
+}
 const dict = await checkedFile(
   resolve(target, "models/ppocrv6_dict.txt"),
   source + "paddle/PP-OCRv6/rec/PP-OCRv6_rec_medium/ppocrv6_dict.txt",
@@ -80,4 +90,6 @@ for (const file of [
     resolve(target, "vendor/ort", file),
   );
 }
-console.log("PP-OCRv6 and ONNX Runtime Web assets ready.");
+console.log(
+  "Public model URL, dictionary and ONNX Runtime Web assets ready (weight not bundled).",
+);

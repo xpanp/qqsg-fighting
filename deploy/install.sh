@@ -23,7 +23,16 @@ rollback() {
 trap rollback ERR
 tar -xzf "$archive" -C "$base/releases/$sha"
 test -f "$base/releases/$sha/index.html"
-test -f "$base/releases/$sha/models/PP-OCRv6_rec_medium.onnx"
+test -f "$base/releases/$sha/models/model.json"
+python3 - "$base/releases/$sha" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); model=json.loads((p/'models/model.json').read_text())
+if not model.get('url','').startswith('https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/'):
+    raise SystemExit('Unexpected public model URL')
+if list(p.rglob('*.onnx')):
+    raise SystemExit('Model weights must not be included in this static release')
+PY
 install -m 644 "$base/releases/$sha/deploy-location.conf" /etc/nginx/snippets/qqsg-fighting.conf
 python3 - "$config" <<'PY'
 import sys

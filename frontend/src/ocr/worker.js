@@ -25,6 +25,8 @@ async function init(preferred = "webgpu", report = () => {}) {
     const configResponse = await fetch(new URL("models/model.json", baseUrl));
     if (!configResponse.ok) throw Error("无法加载识别配置，请刷新页面重试");
     const config = await configResponse.json();
+    if (!config.url || !config.url.startsWith("https://"))
+      throw Error("识别配置缺少公开模型下载地址，请刷新页面重试");
     const warnings = [];
     const dictionary = await loadBinaryResource({
       url: new URL("models/" + config.characters, baseUrl).href,
@@ -47,7 +49,7 @@ async function init(preferred = "webgpu", report = () => {}) {
       throw Error("识别字典格式不正确，请重新准备资源");
     warnings.push(...dictionary.warnings);
     const model = await loadBinaryResource({
-      url: new URL("models/" + config.file, baseUrl).href,
+      url: config.url,
       label: "识别模型",
       sha256: config.sha256,
       cacheName: "qqsg-models-v1", // Reuse verified model bytes from the first deployed version.
