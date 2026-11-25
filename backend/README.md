@@ -1,5 +1,7 @@
-# 后端边界（尚未实现）
+# Go 后端（本地实现，未部署）
 
-后续 Go 服务与 frontend 同仓维护，负责账号、消息批量接收/幂等回执、多人消息合并、SSE 订阅、查询统计及导出。
+与 frontend 同仓维护。提供单 admin、采集凭据、文字接收/修订幂等、业务事件关联、名单/黑名单、可重算统计与 Excel。尚无普通用户注册，不接收视频或截图。
 
-第一阶段仅 Nginx 静态分发，不运行 Go 服务、不创建数据库、不接收录像或 OCR 文字。数据边界见 ../contracts/types.ts 和 ../docs/architecture.md；实施时再建立 cmd/、internal/ 和接口文档。
+入口 `cmd/server`；`internal/httpapi` 处理路由/权限；`processing` 为无数据库依赖的处理算法；`store` 封装接收、配置、审计与单 worker 的快照/事务发布，按职责分文件。初始 SQL 位于 `internal/store/migrations`，遇未来未知版本拒绝启动。
+
+运行/名单/备份与部署：[指南](../deploy/phase2.md)。协议：[api.md](api.md)。规格：[SPC-0006](../docs/spc/0006-server-collection-and-admin.md)。用户在本地验证结束后追加授权发布；数据库、秘密及真实文字不提交。

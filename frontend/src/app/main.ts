@@ -7,7 +7,29 @@ import { MessageArchive } from "../storage/message-archive";
 import { MessageMerger, messageCandidates } from "../messages/merger";
 import * as store from "../storage/journal";
 import type { Rect, MergedMessage } from "../../../contracts/types";
+import { SyncClient, type SyncSettings } from "../sync/client";
 renderShell();
+let syncSettings: SyncSettings = { enabled: false, token: "", sourceId: "", realm: "", line: "" };
+try { const saved = JSON.parse(localStorage.getItem("qqsg-sync-settings-v2") ?? "null"); if (saved) syncSettings = { ...syncSettings, ...saved }; } catch {}
+for (const [id, key] of [["sync-source", "sourceId"], ["sync-token", "token"], ["sync-realm", "realm"], ["sync-line", "line"]] as const) $<HTMLInputElement>(id).value = syncSettings[key];
+$<HTMLInputElement>("sync-enabled").checked = syncSettings.enabled;
+const sync = new SyncClient({ settings: () => syncSettings, scan: store.messagePage, onStatus: s => setText("sync-status", `${s.detail} · 待上传 ${s.pending} 条${s.rejected ? ` · 需处理 ${s.rejected} 条` : ""}${s.lastSuccess ? ` · 最近成功 ${new Date(s.lastSuccess).toLocaleTimeString()}` : ""}`) });
+function saveSyncSettings() {
+  if (recorder && ($<HTMLInputElement>("sync-source").value.trim() !== syncSettings.sourceId || $<HTMLInputElement>("sync-realm").value.trim() !== syncSettings.realm || $<HTMLInputElement>("sync-line").value.trim() !== syncSettings.line)) {
+    setText("sync-status", "录制期间不能更改来源、区服或线路；请先停止并保存。暂停同步仍可使用。");
+    for (const [id, key] of [["sync-source", "sourceId"], ["sync-realm", "realm"], ["sync-line", "line"]] as const) $<HTMLInputElement>(id).value = syncSettings[key];
+  }
+  syncSettings = { enabled: $<HTMLInputElement>("sync-enabled").checked, token: $<HTMLInputElement>("sync-token").value.trim(), sourceId: $<HTMLInputElement>("sync-source").value.trim(), realm: $<HTMLInputElement>("sync-realm").value.trim(), line: $<HTMLInputElement>("sync-line").value.trim() };
+  try { localStorage.setItem("qqsg-sync-settings-v2", JSON.stringify(syncSettings)); } catch { setText("sync-status", "接入配置无法持久保存，本次页面仍可使用；录像继续"); }
+  sync.reset();
+  if (recorder && syncSettings.enabled) sync.authorize(recorder.sessionId, startedUtc);
+}
+$("sync-save").onclick = saveSyncSettings;
+$("sync-enabled").onchange = saveSyncSettings;
+$("sync-diagnostics").onclick = () => {
+  void sync.outbox.rows().then(rows => store.download(new Blob([JSON.stringify(rows.map(r => ({ sessionId: r.sessionId, messageId: r.message.id, revision: r.message.revision, state: r.state, reason: r.rejected })), null, 2)], { type: "application/json" }), "sync-diagnostics.json")).catch(() => setText("sync-status", "无法读取同步诊断，录像继续"));
+};
+sync.start();
 let folder: store.DirectoryHandle | undefined,
   source: MediaStream | undefined,
   area: Rect | undefined,
@@ -190,6 +212,7 @@ async function tickOcr() {
     archive?.update(changes);
     for (const row of changes) sessionMessageIds.add(row.id);
     await store.saveMessages(changes);
+    sync.notify(changes);
     if (token !== sessionGeneration) return;
     for (const row of changes) knownMessages.set(row.id, row);
     renderMessages();
@@ -469,6 +492,7 @@ async function start() {
       "本次文字每分钟自动保存，停止时保存最后结果",
     );
     await next.start();
+    sync.authorize(next.sessionId, startedUtc);
     if (token !== sessionGeneration || recorder !== next) return;
     setText("record-state", "● 正在录制");
     $("record-state").classList.add("recording");

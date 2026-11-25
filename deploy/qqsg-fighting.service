@@ -1,0 +1,23 @@
+[Unit]
+Description=QQSG text collection and admin API
+After=network.target
+
+[Service]
+Type=simple
+User=qqsg-fighting
+Group=qqsg-fighting
+WorkingDirectory=/var/lib/qqsg-fighting
+ExecStart=/var/www/qqsg-fighting/current/bin/qqsg-server --data-dir /var/lib/qqsg-fighting --listen 127.0.0.1:8780 --origin https://jinbaofu.cn
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qqsg-fighting
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

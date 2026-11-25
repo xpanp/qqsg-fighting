@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["frontend/src", "contracts", "vite.config.ts", "tests/phase1"]
+  "include": ["frontend/src", "contracts", "vite.config.ts", "tests/phase1", "tests/phase2"]
 }

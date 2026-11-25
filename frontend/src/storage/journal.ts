@@ -162,6 +162,22 @@ export async function saveMessages(rows: MergedMessage[]) {
 export function messages() {
   return read<MergedMessage[]>("messages");
 }
+/** Read a bounded page without upgrading the recording database or loading all history. */
+export async function messagePage(after?: string, limit = 100): Promise<{ rows: MergedMessage[]; after?: string }> {
+  const db = await database();
+  return new Promise((resolve, reject) => {
+    const rows: MergedMessage[] = [];
+    const r = db.transaction("messages").objectStore("messages").openCursor(after ? IDBKeyRange.lowerBound(after, true) : undefined);
+    r.onerror = () => reject(r.error);
+    r.onsuccess = () => {
+      const c = r.result;
+      if (!c) { resolve({ rows }); return; }
+      rows.push(c.value);
+      if (rows.length >= limit) { resolve({ rows, after: String(c.key) }); return; }
+      c.continue();
+    };
+  });
+}
 // A tab may record or recover, but recovery must never consume another live tab's chunks.
 const captureLockName = "qqsg-capture-or-recovery-v1";
 export async function acquireCaptureLease(): Promise<() => void> {

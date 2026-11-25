@@ -2,6 +2,10 @@
 
 目标：`https://jinbaofu.cn/fighting/`。保留原首页代理，增加 HTTPS server 内独立 location，不运行 Go 或业务数据库。
 
+本文件以下命令仍用于当前静态版本。下一阶段 Go/systemd、管理入口与持久目录规划见 [第二阶段设计](../docs/phase-2-design.md)。计划 release 改为 web/bin 分离，现有脚本尚未适配，不能按新布局直接发布；实施前需重查服务器并验证迁移及回滚，本次未操作服务器。
+
+第二阶段代码与测试见 [phase2.md](phase2.md)。用户最初要求仅本地，其后追加明确授权部署。新版本使用 `scripts/deploy-phase2.ps1`；下方旧静态命令不适用于 web/bin 布局。
+
 本机准备 Node >=22.12、npm、Windows OpenSSH 和服务器免密别名 tx。干净工作区、审查完成并提交后：
 
 ```powershell
