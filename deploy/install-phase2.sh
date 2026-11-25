@@ -184,7 +184,14 @@ install -m 644 "$release/deploy/nginx-phase2.conf" "$snippet"
 nginx -t
 systemctl reload nginx
 [[ $(curl --connect-timeout 2 --max-time 5 -sS --resolve jinbaofu.cn:443:127.0.0.1 -o /dev/null -w '%{http_code}' https://jinbaofu.cn/fighting/api/v1/admin/stats) == 401 ]]
-curl --connect-timeout 2 --max-time 5 -fsS --resolve jinbaofu.cn:443:127.0.0.1 https://jinbaofu.cn/fighting/version.json | python3 -c 'import json,sys;assert json.load(sys.stdin)["commit"]==sys.argv[1]' "$sha"
+version_ready=0
+for attempt in $(seq 1 20); do
+    # reload returns before every old nginx worker has drained; tolerate the old
+    # bridge response briefly, and accept historical UTF-8 BOM JSON for parsing.
+    if curl --connect-timeout 2 --max-time 5 -fsS --resolve jinbaofu.cn:443:127.0.0.1 https://jinbaofu.cn/fighting/version.json | python3 -c 'import json,sys;assert json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))["commit"]==sys.argv[1]' "$sha" 2>/dev/null; then version_ready=1; break; fi
+    sleep 1
+done
+[[ $version_ready == 1 ]]
 printf 'commit=%s\nprevious=%s\nbackup=%s\nhad_unit=%s\nwas_active=%s\nwas_enabled=%s\n' "$sha" "$old" "$backup" "$had_unit" "$was_active" "$was_enabled" > "$release/deployment.txt"
 trap - ERR
 echo "Deployed $sha. Previous: $old. Backup: $backup"
