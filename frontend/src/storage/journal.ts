@@ -2,6 +2,7 @@ import type { MergedMessage, RecordingSegment } from "../../../contracts/types";
 export type Segment = RecordingSegment;
 export interface DirectoryHandle {
   name: string;
+  removeEntry?(name: string): Promise<void>;
   getFileHandle(
     name: string,
     options?: { create: boolean },
@@ -24,6 +25,78 @@ export async function chooseDirectory(): Promise<DirectoryHandle> {
       "请选择桌面版 Chrome 或 Edge；当前浏览器不支持直接保存到目录。",
     );
   return picker.call(window, { mode: "readwrite" });
+}
+export type DirectoryWritePhase =
+  | "create-file"
+  | "create-writable"
+  | "write"
+  | "close";
+export class DirectoryWriteError extends Error {
+  readonly originalName: string;
+  constructor(
+    readonly directory: string,
+    readonly phase: DirectoryWritePhase,
+    cause: unknown,
+  ) {
+    const name = cause instanceof Error ? cause.name : "Error",
+      detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `目录“${directory || "所选目录"}”写入验证失败（${phase}，${name}）：${detail}。请重新选择可写目录。`,
+      { cause },
+    );
+    this.name = "DirectoryWriteError";
+    this.originalName = name;
+  }
+}
+/** Test the real write/close path, without changing a user's existing files. */
+export async function verifyDirectoryWritable(
+  folder: DirectoryHandle,
+): Promise<{ warning?: string }> {
+  const name = ".qqsg-write-check-" + crypto.randomUUID() + ".tmp";
+  let phase: DirectoryWritePhase = "create-file",
+    created = false,
+    closed = false,
+    stream:
+      | Awaited<
+          ReturnType<
+            Awaited<
+              ReturnType<DirectoryHandle["getFileHandle"]>
+            >["createWritable"]
+          >
+        >
+      | undefined;
+  let failure: DirectoryWriteError | undefined, warning: string | undefined;
+  try {
+    const file = await folder.getFileHandle(name, { create: true });
+    created = true;
+    phase = "create-writable";
+    stream = await file.createWritable();
+    phase = "write";
+    await stream.write(
+      new Blob(["QQSG directory write verification\n"], { type: "text/plain" }),
+    );
+    phase = "close";
+    await stream.close();
+    closed = true;
+  } catch (error) {
+    failure = new DirectoryWriteError(folder.name, phase, error);
+  } finally {
+    if (stream && !closed)
+      try {
+        await stream.abort();
+      } catch {}
+    if (created) {
+      if (folder.removeEntry)
+        try {
+          await folder.removeEntry(name);
+        } catch {
+          warning = `目录可写，但测试文件未能自动清理：${name}`;
+        }
+      else warning = `目录可写；浏览器不支持自动清理测试文件：${name}`;
+    }
+  }
+  if (failure) throw failure;
+  return warning ? { warning } : {};
 }
 let opened: Promise<IDBDatabase> | undefined;
 export function database() {
@@ -163,17 +236,29 @@ export function messages() {
   return read<MergedMessage[]>("messages");
 }
 /** Read a bounded page without upgrading the recording database or loading all history. */
-export async function messagePage(after?: string, limit = 100): Promise<{ rows: MergedMessage[]; after?: string }> {
+export async function messagePage(
+  after?: string,
+  limit = 100,
+): Promise<{ rows: MergedMessage[]; after?: string }> {
   const db = await database();
   return new Promise((resolve, reject) => {
     const rows: MergedMessage[] = [];
-    const r = db.transaction("messages").objectStore("messages").openCursor(after ? IDBKeyRange.lowerBound(after, true) : undefined);
+    const r = db
+      .transaction("messages")
+      .objectStore("messages")
+      .openCursor(after ? IDBKeyRange.lowerBound(after, true) : undefined);
     r.onerror = () => reject(r.error);
     r.onsuccess = () => {
       const c = r.result;
-      if (!c) { resolve({ rows }); return; }
+      if (!c) {
+        resolve({ rows });
+        return;
+      }
       rows.push(c.value);
-      if (rows.length >= limit) { resolve({ rows, after: String(c.key) }); return; }
+      if (rows.length >= limit) {
+        resolve({ rows, after: String(c.key) });
+        return;
+      }
       c.continue();
     };
   });

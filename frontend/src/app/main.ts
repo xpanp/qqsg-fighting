@@ -196,6 +196,7 @@ let preparingClient: OcrClient | undefined;
 let client: OcrClient | undefined,
   loading: Promise<void> | undefined,
   ocrBusy = false,
+  checkingFolder = false,
   starting = false,
   stopping = false,
   startedMono = 0,
@@ -222,7 +223,7 @@ function failure(error: unknown) {
   notify(describe(error), true);
 }
 function controls() {
-  const busy = starting || stopping || !!recorder;
+  const busy = checkingFolder || starting || stopping || !!recorder;
   button("folder").disabled = busy;
   button("share").disabled = busy;
   button("record").disabled = busy || !folder || !source || !area;
@@ -461,13 +462,34 @@ function paintPreview() {
   }
 }
 button("folder").onclick = async () => {
+  if (checkingFolder || starting || stopping || recorder) return;
+  checkingFolder = true;
+  controls();
+  const previous = folder;
+  let picked = false;
   try {
-    folder = await store.chooseDirectory();
-    setText("folder-label", "保存目录：" + folder.name);
-    notify("保存目录已选择，接下来选择 QQ 三国窗口。");
+    const candidate = await store.chooseDirectory();
+    picked = true;
+    folder = undefined;
+    setText("folder-label", "正在验证目录可写：" + candidate.name);
+    const result = await store.verifyDirectoryWritable(candidate);
+    folder = candidate;
+    setText("folder-label", "保存目录：" + candidate.name + " · 已验证可写");
+    notify(
+      result.warning ?? "目录写入验证通过，接下来选择 QQ 三国窗口。",
+      !!result.warning,
+    );
+  } catch (error) {
+    if (!picked && error instanceof DOMException && error.name === "AbortError")
+      folder = previous;
+    else {
+      folder = undefined;
+      setText("folder-label", "目录不可写，请重新选择");
+      failure(error);
+    }
+  } finally {
+    checkingFolder = false;
     controls();
-  } catch (e) {
-    failure(e);
   }
 };
 button("share").onclick = async () => {
@@ -579,13 +601,24 @@ preview.onpointercancel = () => {
   controls();
 };
 async function start() {
-  if (starting || recorder) return;
+  if (checkingFolder || starting || recorder) return;
   if (!source || !area || !folder)
     throw Error("请先选择保存目录、游戏窗口，并框选聊天区域。");
   starting = true;
   controls();
   const token = ++sessionGeneration;
   try {
+    setText("folder-label", "开始前正在检查目录写入：" + folder.name);
+    try {
+      const verified = await store.verifyDirectoryWritable(folder);
+      setText("folder-label", "保存目录：" + folder.name + " · 已验证可写");
+      if (verified.warning) notify(verified.warning, true);
+    } catch (error) {
+      folder = undefined;
+      setText("folder-label", "目录不可写，请重新选择");
+      throw error;
+    }
+    if (token !== sessionGeneration) return;
     await store.database();
     await navigator.storage?.persist?.().catch(() => false);
     if (token !== sessionGeneration) return;
@@ -688,7 +721,18 @@ async function start() {
     ocrTimer = setInterval(() => void tickOcr(), 1000);
     void tickOcr();
   } catch (e) {
-    await stop(true);
+    if (recorder) await stop(true);
+    else {
+      // Preparation failure must not wait for a prior session's text archive.
+      try {
+        crop?.close();
+      } finally {
+        crop = undefined;
+        releaseCaptureLease?.();
+        releaseCaptureLease = undefined;
+      }
+      setText("record-state", "尚未开始");
+    }
     throw e;
   } finally {
     starting = false;

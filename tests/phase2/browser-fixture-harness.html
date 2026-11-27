@@ -27,7 +27,9 @@
   <div>
     <button id="fixture-select">框选合成聊天区</button
     ><button id="fixture-hang">模拟身份识别挂起</button
-    ><button id="fixture-check">检查已保存视频</button>
+    ><button id="fixture-check">检查已保存视频</button
+    ><button id="fixture-directory-fail">模拟目录拒绝写入</button
+    ><button id="fixture-directory-ok">恢复可写目录</button>
   </div>
   <div id="validation-status">
     使用合成窗口 + OPFS测试目录；真实MediaRecorder
@@ -39,7 +41,14 @@
   let frame = 0,
     workers = 0;
   window.showDirectoryPicker = async () =>
-    (directory = await navigator.storage.getDirectory());
+    window.directoryDenied
+      ? {
+          name: "中文只读目录",
+          async getFileHandle() {
+            throw new DOMException("Access denied", "NotAllowedError");
+          },
+        }
+      : (directory = await navigator.storage.getDirectory());
   Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", {
     value: async () => {
       const c = document.createElement("canvas");
@@ -181,6 +190,15 @@
           files.push(info);
         }
     status.textContent = JSON.stringify({ files, workers, errors }, null, 2);
+  };
+  document.querySelector("#fixture-directory-fail").onclick = () => {
+    window.directoryDenied = true;
+    status.textContent =
+      "下一次选择目录将模拟NotAllowedError，开始按钮应保持禁用";
+  };
+  document.querySelector("#fixture-directory-ok").onclick = () => {
+    window.directoryDenied = false;
+    status.textContent = "下一次选择目录使用实际OPFS可写目录";
   };
   await import("/fighting/src/app/main.ts");
 </script>
