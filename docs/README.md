@@ -18,7 +18,9 @@
 
 ## 当前迭代
 
-[SPC-0008：公共自动接入与来源识别](spc/0008-automatic-collector-and-source.md) 本地验证通过、待用户环境验收；决策见 [ADR-0010](adr/0010-public-collector-admission.md) 与 [ADR-0011](adr/0011-observed-source-and-sync-epochs.md)。与上一轮 [录像优先修复](spc/0007-recording-priority.md) 分开记录。代码、独立复核与本地验证已完成，尚未部署；证据见 [当次报告](tasks/2026-11-27-automatic-collector-validation.md)。
+[SPC-0010：用户管理与 PoC 完善](spc/0010-user-management-and-poc.md) 已本地实现并验证，待用户环境验收；发布尚未执行。决策见 ADR-0012 至0014。
+
+此前SPC-0007/0008/0009已于2026-11-27授权发布，当次核对版本2fe5e77；本轮未重新检查线上。历史记录的未部署描述当时状态。
 
 ## 目录
 

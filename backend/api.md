@@ -29,3 +29,23 @@ CLI: `server --data-dir <path> --init-admin` reads `QQSG_ADMIN_PASSWORD`, initia
 Wire UTC timestamps are integer milliseconds (the capture client rounds only during serialization). Permanent rejections always include `retryable:false`. Ack may include `jobId` for log correlation. Events carry `algorithmVersion`, `timeQuality`, `timeReason`, and nullable `eventTimeUncertaintyMs`; observed-only time is not a precise event clock. Same reliable game second/context/known pair may associate multiple message IDs, including one source; raw revisions remain intact.
 
 Query ranges are at most 31 days; event lists use SQL pagination. Statistics/Excel reject more than 20,000 events or 32 MiB event JSON and use a 3s query deadline. UI/export bind a published projectionVersion. Local verification preceded the user's subsequent production deployment authorization; deployment receipts identify the actual release.
+
+## SPC-0010 账号模式
+
+通过启动参数启用账号模式，路径均在 `/fighting/api/v1/` 下。账号模式的登录会话使用 HttpOnly Cookie。状态变更请求用同源 Origin 和状态接口返回的 `X-CSRF-Token`，采集数据面使用独立的来源凭据。
+
+| 接口 | 权限与用途 |
+| --- | --- |
+| GET auth/session | 读取会话、角色及游客开关 |
+| POST auth/register、auth/login、auth/guest、auth/logout | 注册、登录、游客会话、退出 |
+| POST reports/lease | 申请、续期或释放查看名额，action 为 acquire、renew 或 release |
+| GET reports/events、reports/stats | 普通用户及允许访问的游客需要有效查看租约，超管直接访问 |
+| POST collectors/register | 普通用户和超管登记当前账号与浏览器来源 |
+| POST collectors/lease | 使用来源凭据申请、续期或释放上传名额 |
+| GET system/users，PATCH/DELETE system/users/{id} | Admin 管理账号 |
+| POST system/users/{id}/password | Admin 按次查看原始密码，响应禁止缓存 |
+| PATCH system/settings | Admin 设置游客访问 |
+| admin/* | 账号模式中供超管使用的业务接口 |
+| POST admin/name-configs/{id}/restore | 超管恢复指定名单快照，创建新快照并排队重算 |
+
+服务端对所有受保护接口验证能力。普通/游客的页面访问租约和采集租约各自到期回收。区服未确认的本地录制继续保存，前端不排入上传。账号版不接受旧匿名采集凭据。

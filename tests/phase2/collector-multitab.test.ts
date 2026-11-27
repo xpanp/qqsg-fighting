@@ -124,7 +124,7 @@ test("existing shared credential wins over stale tab fallback without network re
   assert.equal(requests, 0);
 });
 
-test("main retains nonpersistent warning on subsequent reconnect checks while session stays usable", async () => {
+test("unknown account observations and unavailable installation storage cannot start collector registration", async () => {
   const { createRequire } = await import("node:module");
   const { readFileSync } = await import("node:fs");
   const req = createRequire(import.meta.url),
@@ -151,47 +151,40 @@ test("main retains nonpersistent warning on subsequent reconnect checks while se
     target: "es2022",
   }).code;
   const text = new Map<string, string>();
-  let requests = 0,
-    resets = 0;
-  const env: any = {
+  const intents = [{ context: { realm: "" } }];
+  let requests = 0;
+  const owner = { id: "owner", region: "得陇望蜀" };
+  const env = {
     enrollmentDue: 0,
+    connecting: false,
+    session: { csrf: "session" },
+    realm: owner.region,
+    businessAccount: () => owner,
     syncSettings: { ...empty, enabled: true },
-    recorder: {},
     setText: (id: string, s: string) => text.set(id, s),
     navigator: {
-      locks: { request: async (_name: string, task: any) => task() },
+      locks: { request: async (_name: string, task: () => unknown) => task() },
     },
-    enrollBrowser,
-    enrollment: new CollectorEnrollment({
-      fetch: async () => {
-        requests++;
-        return Response.json(credential);
-      },
-    }),
-    readCollectorCredential: () => undefined,
+    request: async () => { requests++; return credential; },
     localStorage: {
-      setItem() {
-        throw new DOMException("blocked", "SecurityError");
-      },
+      getItem() { return null; },
+      setItem() { throw new DOMException("blocked", "SecurityError"); },
     },
-    COLLECTOR_STORAGE_KEY: "test",
     sync: {
-      reset() {
-        resets++;
-      },
+      reset() { assert.fail("unavailable storage must not authorize upload"); },
+      outbox: { captureIntents: async () => intents, grants: async () => [] },
     },
     describe: String,
   };
-  const harness = new Function(
+  const connect = new Function(
     ...Object.keys(env),
-    code + ";return{connectCollector,getSettings:()=>syncSettings};",
+    code + ";return connectCollector;",
   )(...Object.values(env));
-  await harness.connectCollector();
-  assert.match(text.get("enrollment-status")!, /暂不能持久保存/);
-  assert.match(text.get("enrollment-status")!, /本次可用/);
-  assert.equal(harness.getSettings().token, credential.token);
-  await harness.connectCollector();
-  assert.match(text.get("enrollment-status")!, /暂不能持久保存/);
-  assert.equal(requests, 1);
-  assert.equal(resets, 1);
+  await connect();
+  assert.equal(requests, 0);
+  assert.equal(text.has("enrollment-status"), false);
+  intents.push({ context: { realm: owner.region } });
+  await connect();
+  assert.equal(requests, 0);
+  assert.match(text.get("enrollment-status")!, /本地录像继续/);
 });

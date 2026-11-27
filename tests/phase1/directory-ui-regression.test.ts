@@ -57,6 +57,12 @@ function harness(store: any) {
     crop: undefined,
     releaseCaptureLease: undefined,
     starting: false,
+    captureOwner: undefined,
+    locationConfirmed: false,
+    identityTracker: undefined,
+    IdentityTracker: class {},
+    businessAccount: () => ({ id: "recording-owner" }),
+    renderAccount: () => api.controls(),
     stopping: false,
     checkingFolder: false,
     sessionGeneration: 0,
@@ -87,7 +93,7 @@ function harness(store: any) {
   const api = new Function(
     ...Object.keys(env),
     js +
-      ';controls();return{pick:button("folder").onclick,start,getFolder:()=>folder,checking:()=>checkingFolder};',
+      ';controls();return{pick:button("folder").onclick,start,controls,getFolder:()=>folder,checking:()=>checkingFolder};',
   )(...Object.values(env));
   return {
     ...api,

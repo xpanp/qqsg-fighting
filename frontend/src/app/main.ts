@@ -8,12 +8,9 @@ import { MessageMerger, messageCandidates } from "../messages/merger";
 import * as store from "../storage/journal";
 import type { Rect, MergedMessage } from "../../../contracts/types";
 import { SyncClient, type SyncSettings } from "../sync/client";
-import {
-  CollectorEnrollment,
-  enrollBrowser,
-  readCollectorCredential,
-  COLLECTOR_STORAGE_KEY,
-} from "../sync/enrollment";
+import { Outbox } from "../sync/outbox";
+import { realm, request, type Session } from "../auth/client";
+import { mountLogin } from "../auth/view";
 import {
   parseCaptureIdentity,
   IdentityTracker,
@@ -21,90 +18,147 @@ import {
 } from "../capture/identity";
 import { identityImages } from "../capture/identity-images";
 renderShell();
-let syncSettings: SyncSettings = {
-  enabled: true,
-  token: "",
-  sourceId: "",
-  realm: "",
-  line: "",
-};
-try {
-  const saved = JSON.parse(
-    localStorage.getItem("qqsg-sync-settings-v2") ?? "null",
-  );
-  if (typeof saved?.token === "string" && typeof saved?.sourceId === "string")
-    syncSettings = {
-      ...syncSettings,
-      token: saved.token,
-      sourceId: saved.sourceId,
-    };
-} catch {}
-const enrollment = new CollectorEnrollment();
+let session: Session | undefined;
+let sync: SyncClient | undefined;
+let syncSettings: SyncSettings | undefined;
+let captureOwner: string | undefined;
+let connecting = false;
+let enrollmentDue = 0;
 let identity: CaptureIdentity = { evidence: {} };
-let identityDue = 0,
-  enrollmentDue = 0;
+let identityDue = 0;
 let identityTracker = new IdentityTracker();
+let locationConfirmed = false;
+let accountOperation = false;
+let sessionRevision = 0;
+
+function businessAccount() {
+  const user = session?.user;
+  return user?.role === "ordinary" || user?.role === "super" ? user : undefined;
+}
+
 function renderIdentity() {
   setText(
     "capture-identity",
     `服务器：${identity.realm ?? "未识别"} · 线路：${identity.line ? identity.line + " 线" : "未识别"} · 角色：${identity.character ?? "未识别"}`,
   );
 }
-const sync = new SyncClient({
-  settings: () => syncSettings,
-  scan: store.messagePage,
-  onStatus: (s) =>
-    setText(
-      "sync-status",
-      `${s.detail} · 待传 ${s.pending} 条${s.rejected ? " · 需处理 " + s.rejected + " 条" : ""}`,
-    ),
-});
+
 function bindIdentity(atMs = Date.now()) {
-  syncSettings = {
-    ...syncSettings,
-    realm: identity.realm ?? "",
-    line: identity.line ?? "",
-    character: identity.character,
-  };
-  if (recorder)
-    sync.bindCapture(recorder.sessionId, startedUtc, identity, atMs);
+  if (recorder && captureOwner === businessAccount()?.id)
+    sync?.bindCapture(recorder.sessionId, startedUtc, locationConfirmed ? identity : { realm: "" }, atMs);
 }
+
+function applySession(next?: Session) {
+  sessionRevision++;
+  const previous = session?.user?.id;
+  const priorCsrf = session?.csrf;
+  session = next;
+  const user = businessAccount();
+  if (!user || user.id !== previous || priorCsrf !== next?.csrf || !sync) {
+    sync?.stop();
+    sync = undefined;
+    syncSettings = undefined;
+    enrollmentDue = 0;
+    if (user && (!captureOwner || captureOwner === user.id)) {
+      const settings: SyncSettings = { enabled: true, token: "", sourceId: "", realm: user.region, line: "" };
+      syncSettings = settings;
+      sync = new SyncClient({
+        settings: () => settings,
+        scan: store.messagePage,
+        outbox: new Outbox(5000, "qqsg-sync-account-v1-" + user.id),
+        supportedRealm: realm,
+        onStatus: s => {
+          if (syncSettings !== settings) return;
+          setText("sync-status", `${s.detail} · 待传 ${s.pending} 条`);
+        },
+      });
+      void connectCollector();
+    }
+  }
+  renderAccount();
+}
+
+function renderAccount() {
+  const target = $("account");
+  const user = session?.user;
+  const capturing = starting || !!recorder || stopping;
+  $("recording-area").hidden = !capturing && !businessAccount();
+  if (!user && !capturing) {
+    mountLogin(target, applySession, session?.guestReports ?? true);
+  } else {
+    target.replaceChildren();
+    const info = document.createElement("p");
+    info.textContent = user ? `当前账号：${user.username || "游客"}` : "登录已结束。请停止并保存当前录制，再登录其他账号。";
+    target.append(info);
+    if (user) {
+      const actions = document.createElement("div");
+      actions.className = "controls";
+      const link = document.createElement("a");
+      link.href = "/fighting/admin/";
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = user.role === "admin" ? "打开用户管理" : "打开战报";
+      const logout = document.createElement("button");
+      logout.textContent = "退出登录";
+      logout.onclick = async () => {
+        logout.disabled = true;
+        accountOperation = true;
+        try {
+          await request("auth/logout", "POST", {}, session?.csrf);
+          applySession();
+        } catch (e) {
+          info.textContent = "退出失败：" + describe(e);
+          logout.disabled = false;
+        } finally { accountOperation = false; }
+      };
+      actions.append(link, logout);
+      target.append(actions);
+    }
+  }
+  controls();
+}
+
 async function connectCollector() {
-  if (
-    Date.now() < enrollmentDue ||
-    (syncSettings.sourceId && syncSettings.token)
-  )
-    return;
+  const owner = businessAccount();
+  const client = sync;
+  const settings = syncSettings;
+  if (!owner || !client || !settings || settings.token || connecting || Date.now() < enrollmentDue) return;
+  connecting = true;
   try {
-    if (!recorder && !(await sync.outbox.captureIntents()).length) return;
-    if (Date.now() < enrollmentDue) return;
-    enrollmentDue = Date.now() + 60000;
-    setText("enrollment-status", "正在接入文字采集服务，本地录像继续");
-    if (!navigator.locks)
-      throw Error(
-        "浏览器暂不支持自动采集接入，请使用近期桌面Chrome或Edge；录像继续",
-      );
-    const registered = await enrollBrowser(enrollment, syncSettings, {
-      read: () => readCollectorCredential(localStorage),
-      save: (credentials) =>
-        localStorage.setItem(
-          COLLECTOR_STORAGE_KEY,
-          JSON.stringify(credentials),
-        ),
-      lock: async (name, task) => await navigator.locks.request(name, task),
-    });
-    syncSettings = { ...syncSettings, ...registered.credential, enabled: true };
-    const persistent = registered.persistent;
-    setText(
-      "enrollment-status",
-      persistent
-        ? "文字采集服务已接入"
-        : "采集标识暂不能持久保存；本次可用，下次可能重新接入，本地录像继续",
-    );
-    sync.reset();
+    if (!(await client.outbox.captureIntents()).some(intent => intent.context.realm === realm) && !(await client.outbox.grants()).some(grant => grant.context.realm === realm)) return;
+    const readInstallation = () => {
+      const key = "qqsg-installation-id";
+      const existing = localStorage.getItem(key);
+      if (existing) return existing;
+      const id = crypto.randomUUID();
+      localStorage.setItem(key, id);
+      return id;
+    };
+    const installationId = navigator.locks ? await navigator.locks.request("qqsg-installation-id", readInstallation) : readInstallation();
+    if (client !== sync) return;
+    const result = await request<{ sourceId: string; token: string }>("collectors/register", "POST", { installationId, region: owner.region }, session?.csrf);
+    if (client !== sync || owner.id !== businessAccount()?.id) return;
+    Object.assign(settings, result);
+    setText("enrollment-status", "文字采集服务已接入");
+    client.reset();
   } catch (e) {
-    enrollmentDue = Math.max(Date.now() + 1000, enrollment.nextAttemptAt);
-    setText("enrollment-status", describe(e) + "；约一分钟后自动重试");
+    enrollmentDue = Date.now() + 30000;
+    setText("enrollment-status", describe(e) + "。将自动重试，本地录像继续。");
+  } finally { connecting = false; }
+}
+
+async function refreshSession() {
+  if (accountOperation) return;
+  const revision = sessionRevision;
+  try {
+    const next = await request<Session>("auth/session");
+    if (accountOperation || revision !== sessionRevision) return;
+    if (captureOwner && next.user?.id !== captureOwner) {
+      if (session?.user) applySession();
+    }
+    else if (next.user?.id !== session?.user?.id || next.user?.role !== session?.user?.role || next.csrf !== session?.csrf || next.guestReports !== session?.guestReports) applySession(next);
+  } catch {
+    if (!session) setText("enrollment-status", "登录服务暂不可用");
   }
 }
 async function readWindowIdentity(token: number) {
@@ -131,13 +185,18 @@ async function readWindowIdentity(token: number) {
       characterLines: [result.character],
     });
     const confirmed = identityTracker.observe(candidate, sampledAtMs);
-    if (confirmed.changed) {
+    const previousConfirmation = locationConfirmed;
+    locationConfirmed = confirmed.locationStable && confirmed.identity.realm === realm;
+    if (!locationConfirmed) identityDue = performance.now() + 5000;
+    if (confirmed.changed || previousConfirmation !== locationConfirmed) {
       identity = confirmed.identity;
       renderIdentity();
       bindIdentity(confirmed.sampledAtMs);
     }
   } catch {
     if (token !== ocrGeneration) return;
+    locationConfirmed = false;
+    bindIdentity(startedUtc + performance.now() - startedMono);
     identityTracker.observe(
       { evidence: {} },
       startedUtc + performance.now() - startedMono,
@@ -150,37 +209,6 @@ async function readWindowIdentity(token: number) {
     );
   }
 }
-renderIdentity();
-if (syncSettings.sourceId && syncSettings.token)
-  setText("enrollment-status", "已记住本机采集接入");
-window.addEventListener("storage", (event) => {
-  if (event.key !== COLLECTOR_STORAGE_KEY) return;
-  try {
-    const saved = readCollectorCredential(localStorage);
-    if (
-      saved &&
-      (saved.sourceId !== syncSettings.sourceId ||
-        saved.token !== syncSettings.token)
-    ) {
-      syncSettings = { ...syncSettings, ...saved, enabled: true };
-      setText("enrollment-status", "已复用本浏览器采集接入");
-      sync.reset();
-    }
-  } catch {}
-});
-sync.start();
-// Registration and recovery keep working after OCR or recording stops.
-setInterval(() => {
-  void connectCollector().catch(() =>
-    setText(
-      "enrollment-status",
-      "采集接入暂不能读取，将自动重试，本地录像继续",
-    ),
-  );
-}, 60000);
-queueMicrotask(() => {
-  void connectCollector().catch(() => {});
-});
 let folder: store.DirectoryHandle | undefined,
   source: MediaStream | undefined,
   area: Rect | undefined,
@@ -226,7 +254,7 @@ function controls() {
   const busy = checkingFolder || starting || stopping || !!recorder;
   button("folder").disabled = busy;
   button("share").disabled = busy;
-  button("record").disabled = busy || !folder || !source || !area;
+  button("record").disabled = busy || !businessAccount() || !folder || !source || !area;
   button("stop").disabled = !recorder || stopping;
   for (const [id, active] of [
     ["step-folder", !!folder],
@@ -376,7 +404,7 @@ async function tickOcr() {
     archive?.update(changes);
     for (const row of changes) sessionMessageIds.add(row.id);
     await store.saveMessages(changes);
-    sync.notify(changes);
+    sync?.notify(changes);
     if (token !== ocrGeneration) return;
     for (const row of changes) knownMessages.set(row.id, row);
     renderMessages();
@@ -601,9 +629,12 @@ preview.onpointercancel = () => {
   controls();
 };
 async function start() {
-  if (checkingFolder || starting || recorder) return;
+  if (checkingFolder || starting || recorder || !businessAccount()) return;
   if (!source || !area || !folder)
     throw Error("请先选择保存目录、游戏窗口，并框选聊天区域。");
+  captureOwner = businessAccount()?.id;
+  locationConfirmed = false;
+  identityTracker = new IdentityTracker();
   starting = true;
   controls();
   const token = ++sessionGeneration;
@@ -698,7 +729,6 @@ async function start() {
       "本次文字每分钟自动保存，停止时保存最后结果",
     );
     await next.start();
-    bindIdentity(startedUtc);
     void connectCollector();
     if (token !== sessionGeneration || recorder !== next) return;
     setText("record-state", "● 正在录制");
@@ -736,7 +766,8 @@ async function start() {
     throw e;
   } finally {
     starting = false;
-    controls();
+    if (!recorder) captureOwner = undefined;
+    renderAccount();
   }
 }
 async function stop(hasError = false) {
@@ -790,6 +821,8 @@ async function stop(hasError = false) {
       releaseCaptureLease?.();
       releaseCaptureLease = undefined;
       stopping = false;
+      captureOwner = undefined;
+      renderAccount();
       $("record-state").classList.remove("recording");
       controls();
       await refreshSegments().catch(failure);
@@ -899,6 +932,11 @@ $<HTMLInputElement>("ocr-enabled").onchange = () => {
   );
   if (checked("ocr-enabled")) void tickOcr();
   else {
+    locationConfirmed = false;
+    identityDue = 0;
+    const pausedAt = startedUtc + performance.now() - startedMono;
+    identityTracker.observe({ evidence: {} }, pausedAt);
+    bindIdentity(pausedAt);
     ocrGeneration++;
     client?.close();
     preparingClient?.close();
@@ -950,3 +988,9 @@ void refreshSegments().catch(failure);
 controls();
 if (!isSecureContext || !navigator.mediaDevices?.getDisplayMedia)
   notify("请通过 HTTPS 或本机地址，使用桌面 Chrome / Edge 打开此页面。", true);
+
+renderAccount();
+void refreshSession();
+setInterval(() => { void refreshSession(); void connectCollector(); }, 10000);
+window.addEventListener("pagehide", () => sync?.stop());
+window.addEventListener("pageshow", event => { if (event.persisted) { sync?.start(); void refreshSession(); } });

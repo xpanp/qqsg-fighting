@@ -38,6 +38,8 @@ type Server struct {
 	RegistrationLimit   int
 	MaxActiveCollectors int
 	activeCollectors    map[string]time.Time
+	MaxViewers          int
+	accounts            *accountFeature
 }
 type bucket struct {
 	count int
@@ -45,7 +47,7 @@ type bucket struct {
 }
 
 func New(s *store.Store, origin string, insecure bool) *Server {
-	return &Server{Store: s, Origin: strings.TrimRight(origin, "/"), InsecureLocal: insecure, Log: slog.Default(), limits: map[string]*bucket{}, PublicRegistration: true, RegistrationLimit: 1000, MaxActiveCollectors: 10, activeCollectors: map[string]time.Time{}}
+	return &Server{Store: s, Origin: strings.TrimRight(origin, "/"), InsecureLocal: insecure, Log: slog.Default(), limits: map[string]*bucket{}, PublicRegistration: true, RegistrationLimit: 1000, MaxActiveCollectors: 10, MaxViewers: 100, activeCollectors: map[string]time.Time{}}
 }
 func (s *Server) InitAdmin(password string) error {
 	if len(password) < 12 || len(password) > 72 {
@@ -64,6 +66,13 @@ func (s *Server) InitAdmin(password string) error {
 	if e == nil {
 		_, e = tx.Exec(`DELETE FROM sessions`)
 	}
+	if e == nil {
+		var accountSessions int
+		e = tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='account_sessions'`).Scan(&accountSessions)
+		if e == nil && accountSessions != 0 {
+			_, e = tx.Exec(`DELETE FROM account_sessions WHERE user_id=?`, systemAdmin)
+		}
+	}
 	if e != nil {
 		return e
 	}
@@ -74,23 +83,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+Prefix+"collectors/register", s.registerCollector)
 	mux.HandleFunc("POST "+Prefix+"ingest/batches", s.ingest)
 	mux.HandleFunc("GET "+Prefix+"time", s.clock)
-	mux.HandleFunc("POST "+Prefix+"admin/login", s.login)
+
 	admin := http.NewServeMux()
-	admin.HandleFunc("GET "+Prefix+"admin/session", s.session)
-	admin.HandleFunc("POST "+Prefix+"admin/logout", s.logout)
+	if s.accounts == nil {
+		admin.HandleFunc("GET "+Prefix+"admin/session", s.session)
+		admin.HandleFunc("POST "+Prefix+"admin/logout", s.logout)
+		admin.HandleFunc("GET "+Prefix+"admin/stream", s.stream)
+	}
 	admin.HandleFunc("GET "+Prefix+"admin/events", s.events)
 	admin.HandleFunc("GET "+Prefix+"admin/messages/{id}", s.message)
 	admin.HandleFunc("GET "+Prefix+"admin/stats", s.stats)
 	admin.HandleFunc("GET "+Prefix+"admin/name-configs", s.configs)
 	admin.HandleFunc("POST "+Prefix+"admin/name-configs", s.saveConfig)
-	admin.HandleFunc("GET "+Prefix+"admin/collector-credentials", s.collectors)
-	admin.HandleFunc("POST "+Prefix+"admin/collector-credentials", s.collector)
+	if s.accounts == nil {
+		admin.HandleFunc("GET "+Prefix+"admin/collector-credentials", s.collectors)
+		admin.HandleFunc("POST "+Prefix+"admin/collector-credentials", s.collector)
+	}
 	admin.HandleFunc("POST "+Prefix+"admin/event-overrides", s.override)
 	admin.HandleFunc("POST "+Prefix+"admin/reprocess", s.reprocess)
 	admin.HandleFunc("GET "+Prefix+"admin/jobs", s.jobs)
 	admin.HandleFunc("POST "+Prefix+"admin/exports", s.export)
-	admin.HandleFunc("GET "+Prefix+"admin/stream", s.stream)
-	mux.Handle(Prefix+"admin/", s.requireAdmin(admin))
+	if s.accounts == nil {
+		mux.HandleFunc("POST "+Prefix+"admin/login", s.login)
+		mux.Handle(Prefix+"admin/", s.requireAdmin(admin))
+	} else {
+		admin.HandleFunc("POST "+Prefix+"admin/name-configs/{id}/restore", s.restoreConfig)
+		s.accountRoutes(mux, admin)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := store.ID()
 		w.Header().Set("X-Request-ID", id)
@@ -225,6 +244,9 @@ func (s *Server) authSource(r *http.Request) (string, error) {
 	if len(token) != 36 {
 		return "", errors.New("invalid token")
 	}
+	if s.accounts != nil {
+		return s.authenticatedAccountSource(r, token)
+	}
 	var source string
 	e := s.Store.DB.QueryRow(`SELECT source_id FROM collectors WHERE token_hash=? AND revoked=0`, store.Hash(token)).Scan(&source)
 	return source, e
@@ -297,6 +319,10 @@ func (s *Server) clock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if source, e := s.authSource(r); e != nil {
+		if s.accounts != nil {
+			fail(w, 401, "credential required")
+			return
+		}
 		if _, e = s.getAdmin(r); e != nil {
 			fail(w, 401, "credential required")
 			return
@@ -314,6 +340,16 @@ func (s *Server) clock(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]int64{"serverTimeMs": time.Now().UnixMilli()})
 }
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
+	if s.accounts != nil {
+		select {
+		case s.accounts.ingest <- struct{}{}:
+			defer func() { <-s.accounts.ingest }()
+		default:
+			w.Header().Set("Retry-After", "2")
+			fail(w, 503, "ingest capacity full")
+			return
+		}
+	}
 	source, e := s.authSource(r)
 	if e != nil {
 		fail(w, 401, "invalid collector credential")
@@ -339,9 +375,27 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid batch or source")
 		return
 	}
-	ack, e := s.Store.Ingest(b)
+	if s.accounts != nil && b.Context.Realm != supportedRegion {
+		fail(w, 403, "unsupported collector region")
+		return
+	}
+	var authorize func(*sql.Tx) error
+	if s.accounts != nil {
+		tokenHash := store.Hash(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		authorize = func(tx *sql.Tx) error {
+			var current string
+			err := tx.QueryRowContext(r.Context(), accountSourceQuery, tokenHash, time.Now().UnixMilli(), supportedRegion).Scan(&current)
+			if err == nil && current != source {
+				return sql.ErrNoRows
+			}
+			return err
+		}
+	}
+	ack, e := s.Store.IngestAuthorized(b, authorize)
 	if e != nil {
-		if e.Error() == "session_context_conflict" {
+		if errors.Is(e, sql.ErrNoRows) && authorize != nil {
+			fail(w, 401, "invalid collector credential")
+		} else if e.Error() == "session_context_conflict" {
 			fail(w, 409, "session context changed")
 		} else {
 			s.Log.Error("ingest failed", "requestId", w.Header().Get("X-Request-ID"), "batchId", b.BatchID, "sourceId", source, "sessionId", b.SessionID)
@@ -397,7 +451,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "query unavailable; retry or choose a narrower time range")
 		return
 	}
-	jsonOut(w, 200, map[string]any{"events": a, "total": total, "projectionVersion": gen})
+	status, _ := s.rosterPublication(r, gen)
+	jsonOut(w, 200, map[string]any{"events": a, "total": total, "projectionVersion": gen, "rosterStatus": status})
 }
 func (s *Server) message(w http.ResponseWriter, r *http.Request) {
 	ev, src, ovs, e := s.Store.Event(r.PathValue("id"))
@@ -426,7 +481,31 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "query unavailable")
 		return
 	}
-	jsonOut(w, 200, processing.Compute(a, start, end, gen))
+	status, _ := s.rosterPublication(r, gen)
+	jsonOut(w, 200, struct {
+		processing.Stats
+		RosterStatus string `json:"rosterStatus"`
+	}{processing.Compute(a, start, end, gen), status})
+}
+
+// Match the returned generation before labeling a report's roster current.
+func (s *Server) rosterPublication(r *http.Request, reportGeneration int64) (status, published string) {
+	var active, job string
+	var generation int64
+	err := s.Store.DB.QueryRowContext(r.Context(), `SELECT a.value,p.value,g.value,COALESCE(j.status,'')
+	FROM meta a JOIN meta p ON p.key='published_config' JOIN meta g ON g.key='generation'
+	LEFT JOIN meta r ON r.key='roster_job' LEFT JOIN jobs j ON j.id=r.value WHERE a.key='active_config'`).
+		Scan(&active, &published, &generation, &job)
+	if err != nil || (reportGeneration >= 0 && reportGeneration != generation) {
+		return "pending", published
+	}
+	if active == published {
+		return "current", published
+	}
+	if job == "failed" {
+		return "failed", published
+	}
+	return "pending", published
 }
 func (s *Server) configs(w http.ResponseWriter, r *http.Request) {
 	c, e := s.Store.Config()
@@ -439,7 +518,8 @@ func (s *Server) configs(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "config unavailable")
 		return
 	}
-	jsonOut(w, 200, map[string]any{"active": c, "versions": v})
+	status, published := s.rosterPublication(r, -1)
+	jsonOut(w, 200, map[string]any{"active": c, "versions": v, "publishedConfigId": published, "rosterStatus": status})
 }
 func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 	var c model.NameConfig
@@ -454,9 +534,21 @@ func (s *Server) saveConfig(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, e.Error())
 		return
 	}
-	id, job, e := s.Store.SaveConfig(c)
+	id, job, e := s.Store.SaveConfigBy(c, accountActor(r))
 	if e != nil {
 		fail(w, 500, "save config unavailable")
+		return
+	}
+	jsonOut(w, 200, map[string]string{"id": id, "jobId": job})
+}
+func (s *Server) restoreConfig(w http.ResponseWriter, r *http.Request) {
+	id, job, err := s.Store.RestoreConfig(r.PathValue("id"), accountActor(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		fail(w, 404, "config not found")
+		return
+	}
+	if err != nil {
+		fail(w, 503, "restore config unavailable")
 		return
 	}
 	jsonOut(w, 200, map[string]string{"id": id, "jobId": job})
@@ -645,7 +737,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 	for {
-		if _, e := s.getAdmin(r); e != nil {
+		if s.accounts != nil {
+			a, err := s.sessionAccount(r)
+			if err != nil || a.Role != "super" {
+				return
+			}
+		} else if _, e := s.getAdmin(r); e != nil {
 			return
 		}
 		gen := s.Store.Generation()

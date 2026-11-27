@@ -120,14 +120,16 @@ export class IdentityTracker {
     ) => {
       if (!value) {
         this.votes.delete(key);
-        return;
+        return false;
       }
       const previous = this.votes.get(key);
       const count = previous?.value === value ? previous.count + 1 : 1;
       this.votes.set(key, { value, count });
-      if (count >= 2) apply();
+      if (count < 2) return false;
+      apply();
+      return true;
     };
-    confirm(
+    const locationStable = confirm(
       "location",
       candidate.realm && candidate.line
         ? JSON.stringify([candidate.realm, candidate.line])
@@ -152,6 +154,6 @@ export class IdentityTracker {
         changed = true;
       }
     });
-    return { identity: structuredClone(this.current), changed, sampledAtMs };
+    return { identity: structuredClone(this.current), changed, sampledAtMs, locationStable };
   }
 }

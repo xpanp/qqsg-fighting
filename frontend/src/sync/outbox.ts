@@ -147,7 +147,7 @@ export class Outbox {
     });
   }
   /** Atomically bind an original capture message once, even after its ack. */
-  enqueueCaptured(grants: SessionGrant[], message: MergedMessage) {
+  enqueueCaptured(grants: SessionGrant[], message: MergedMessage, supportedRealm?: string) {
     const eligible = grants
       .filter(
         (g) =>
@@ -177,6 +177,7 @@ export class Outbox {
           assignments.transaction.abort();
           return;
         }
+        if (supportedRealm && grant.context.realm !== supportedRealm) return;
         const put = () => {
           if (!found.result)
             assignments.put({ key, sessionId: grant.sessionId });

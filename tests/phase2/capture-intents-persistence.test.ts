@@ -229,3 +229,58 @@ test("transient adoption failure retries on next tick without requiring another 
   );
   assert.equal((await box.captureIntents()).length, 0);
 });
+
+test("account-scoped upload sends only observations after supported region confirmation", async () => {
+  const name = "account-outbox-" + crypto.randomUUID();
+  const owner = new Outbox(50, name + "-owner");
+  const other = new Outbox(50, name + "-other");
+  const realm = "得陇望蜀";
+  const collected: string[] = [];
+  const leaseActions: string[] = [];
+  const scan = async () => ({
+    rows: [
+      msg("before", base + 20),
+      msg("first-confirmed", base + 150),
+      msg("wrong-region", base + 220),
+      msg("second-confirmed", base + 350),
+    ],
+  });
+  function client(outbox: Outbox, sourceId: string) {
+    return new SyncClient({
+      supportedRealm: realm,
+      outbox,
+      settings: () => ({ enabled: true, token: "x".repeat(32), sourceId, realm, line: "1" }),
+      scan,
+      onStatus() {},
+      fetch: async (url, init) => {
+        if (String(url).endsWith("/collectors/lease")) {
+          leaseActions.push(JSON.parse(String(init?.body)).action);
+          return Response.json({ ok: true });
+        }
+        if (String(url).endsWith("/time")) return Response.json({ serverTimeMs: Date.now() });
+        const batch = JSON.parse(String(init?.body));
+        assert.equal(batch.context.realm, realm);
+        assert.equal(batch.sourceId, "owner");
+        collected.push(...batch.messages.map((message: { id: string }) => message.id));
+        return Response.json({
+          batchId: batch.batchId,
+          accepted: batch.messages,
+          rejected: [],
+        });
+      },
+    });
+  }
+  const original = client(owner, "owner");
+  original.bindCapture("capture", base, { realm, line: "1" }, base + 100);
+  original.bindCapture("capture", base, { realm: "其他区服", line: "1" }, base + 200);
+  original.bindCapture("capture", base, { realm, line: "1" }, base + 300);
+  await (original as any).contextSerial;
+
+  await client(other, "other").tick();
+  assert.deepEqual(collected, []);
+  await original.tick();
+  await original.tick();
+  await original.tick();
+  assert.deepEqual(collected, ["first-confirmed", "second-confirmed"]);
+  assert.deepEqual(leaseActions, ["acquire", "release"]);
+});

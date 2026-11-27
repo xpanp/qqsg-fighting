@@ -1,7 +1,7 @@
 export function renderShell() {
   document.querySelector("#app")!.innerHTML = `
 <header><div><h1>QQ三国战报 <span style="font-size:13px;font-weight:400;color:#86968d">by ppp</span></h1><p>记录聊天画面，留住每一场战斗</p></div><span class="local-badge">● 视频始终保存在你的电脑</span></header>
-<main class="layout"><div id="alert" role="status" aria-live="polite"></div>
+<section id="account" class="card account-panel"></section><main id="recording-area" class="layout" hidden><div id="alert" role="status" aria-live="polite"></div>
 <section class="card"><h2>录制聊天区域</h2><div class="subtle">先选保存位置，再选游戏窗口，最后框住聊天区。</div><div class="steps"><span id="step-folder" class="step active">1 选择目录</span><span id="step-window" class="step">2 选择窗口</span><span id="step-area" class="step">3 框选聊天区</span></div>
 <div class="controls"><button id="folder">选择保存目录</button><button id="share">选择游戏窗口</button></div><div id="folder-label" class="subtle">未选择保存目录</div>
 <div id="selection-notice" class="notice">请选择“窗口”中的 QQ 三国，然后在下方画面拖动鼠标，框住完整聊天区。</div>

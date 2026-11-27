@@ -378,3 +378,7 @@ details p {
 #save-messages {
   flex-shrink: 0;
 }
+.account-panel { margin: 1rem auto; width: min(90%, 65rem); }
+.account-form { display: flex; align-items: end; flex-wrap: wrap; gap: 1rem; }
+.account-form label { display: grid; gap: .25rem; }
+[hidden] { display: none !important; }

@@ -21,7 +21,16 @@ import (
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
-	if e := run(); e != nil {
+	var e error
+	if len(os.Args) > 1 && os.Args[1] == "report" {
+		e = report(os.Args[2:])
+	} else {
+		if len(os.Args) > 1 && os.Args[1] == "server" {
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
+		e = run()
+	}
+	if e != nil {
 		slog.Error("server stopped", "error", e)
 		os.Exit(1)
 	}
@@ -44,7 +53,12 @@ func run() error {
 		}
 	}
 	maxActiveCollectors := flag.Int("max-active-collectors", maxCollectors, "maximum simultaneously active upload sources (2 minute lease)")
+	accountKeyFile := flag.String("account-key-file", "", "absolute path to account encryption key")
+	maxViewers := flag.Int("max-report-viewers", 100, "maximum simultaneous ordinary and guest report viewers")
 	flag.Parse()
+	if *maxViewers < 1 || *maxViewers > 1000 {
+		return fmt.Errorf("--max-report-viewers must be 1 to 1000")
+	}
 	if *maxActiveCollectors < 1 || *maxActiveCollectors > 1000 {
 		return fmt.Errorf("--max-active-collectors must be 1 to 1000")
 	}
@@ -73,6 +87,7 @@ func run() error {
 	api := httpapi.New(s, strings.TrimRight(*origin, "/"), *insecure)
 	api.PublicRegistration = *publicRegistration
 	api.MaxActiveCollectors = *maxActiveCollectors
+	api.MaxViewers = *maxViewers
 	if *initAdmin {
 		return api.InitAdmin(os.Getenv("QQSG_ADMIN_PASSWORD"))
 	}
@@ -98,12 +113,27 @@ func run() error {
 	if adminCount == 0 {
 		return fmt.Errorf("initialize admin before serving")
 	}
+	if *accountKeyFile != "" {
+		if !filepath.IsAbs(*accountKeyFile) {
+			return fmt.Errorf("--account-key-file must be absolute")
+		}
+		key, err := os.ReadFile(*accountKeyFile)
+		if err != nil {
+			return fmt.Errorf("read account key: %w", err)
+		}
+		if err = api.EnableAccounts(key); err != nil {
+			return err
+		}
+	}
 	if e = s.PrepareWorker(); e != nil {
 		return e
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go api.RunWorker(ctx)
+	if *accountKeyFile != "" {
+		go dailyBackups(ctx, s, *dir)
+	}
 	srv := &http.Server{Addr: *listen, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go func() {
 		<-ctx.Done()

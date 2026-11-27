@@ -43,3 +43,6 @@ wire v2 的同一同步会话 context 不可变。先传未知区服再直接补
 ## 依据与关联
 
 实际协议：[contracts/sync.ts](../../contracts/sync.ts)；同步存储：[outbox.ts](../../frontend/src/sync/outbox.ts)；首轮Review发现旧标签优先、身份阻塞、稳定计数和晚时间边界问题。本轮整体提交以Git历史为准，尚未部署。
+## 后续决策关系（2026-11-28）
+
+[ADR-0013](0013-independent-admission-and-region-gating.md) 规划在账号模式实施后部分取代匿名接入/未知区服上传政策。账号模式已本地实现，现网未切换；本记录历史决定和证据保留。

@@ -55,7 +55,7 @@ export class SyncClient {
       observedAtMs: Math.round(observedAtMs),
       context: {
         sessionStartedAtMs,
-        realm: identity.realm ?? "",
+        realm: this.options.supportedRealm && identity.realm !== this.options.supportedRealm ? "" : identity.realm ?? "",
         line: identity.line ?? "",
         ...(identity.character ? { character: identity.character } : {}),
       },
@@ -92,7 +92,7 @@ export class SyncClient {
           sourceId: settings.sourceId,
           context,
           captureSessionId: intent.captureSessionId,
-          captureFromMs: last
+          captureFromMs: last || this.options.supportedRealm
             ? intent.observedAtMs
             : context.sessionStartedAtMs,
         });
@@ -104,6 +104,7 @@ export class SyncClient {
   private running = false;
   private failures = 0;
   private retryAt = 0;
+  private leaseUntil = 0;
   private authFailed = false;
   private lastSuccess?: number;
   private cursor?: string;
@@ -122,6 +123,7 @@ export class SyncClient {
         after?: string,
       ) => Promise<{ rows: MergedMessage[]; after?: string }>;
       outbox?: Outbox;
+      supportedRealm?: string;
       fetch?: typeof fetch;
     },
   ) {}
@@ -172,7 +174,7 @@ export class SyncClient {
         (g) => g.sessionId === row.sessionId && !g.captureSessionId,
       );
       if (legacy) await this.outbox.enqueue(legacy, row);
-      else await this.outbox.enqueueCaptured(allowed, row);
+      else await this.outbox.enqueueCaptured(allowed, row, this.options.supportedRealm);
     }
   }
   reset() {
@@ -181,6 +183,7 @@ export class SyncClient {
     this.failures = 0;
     this.retryAt = 0;
     this.clock = undefined;
+    this.leaseUntil = 0;
     this.start();
   }
   start() {
@@ -204,10 +207,27 @@ export class SyncClient {
   }
   stop() {
     this.active = false;
+    this.releaseLease();
     this.generation++;
     this.controller?.abort();
     clearTimeout(this.timer);
     this.timer = undefined;
+  }
+  private releaseLease() {
+    if (!this.options.supportedRealm || !this.leaseUntil) return;
+    this.leaseUntil = 0;
+    const { token } = this.options.settings();
+    // Release is advisory. The server expires the lease if this request cannot complete.
+    void (this.options.fetch ?? fetch)("/fighting/api/v1/collectors/lease", {
+      method: "POST",
+      keepalive: true,
+      signal: AbortSignal.timeout(5000),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + token,
+      },
+      body: JSON.stringify({ action: "release" }),
+    }).catch(() => {});
   }
   private async request(
     path: string,
@@ -301,6 +321,7 @@ export class SyncClient {
       this.pendingCount = sampled.pending;
       this.rejectedCount = rejected;
       if (!pending.length) {
+        this.releaseLease();
         this.status(
           scanWarning ||
             (this.lastSuccess
@@ -311,6 +332,13 @@ export class SyncClient {
         );
         this.failures = 0;
         return;
+      }
+      if (this.options.supportedRealm && (!this.leaseUntil || Date.now() >= this.leaseUntil)) {
+        await this.request("collectors/lease", s, generation, {
+          method: "POST",
+          body: JSON.stringify({ action: this.leaseUntil ? "renew" : "acquire" }),
+        });
+        this.leaseUntil = Date.now() + 30000;
       }
       if (!this.clock) {
         const start = Date.now();

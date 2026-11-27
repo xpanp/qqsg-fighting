@@ -11,12 +11,22 @@ import (
 )
 
 func (s *Store) Ingest(b model.Batch) (model.Ack, error) {
+	return s.IngestAuthorized(b, nil)
+}
+
+// IngestAuthorized checks authorization in the transaction that records the batch.
+func (s *Store) IngestAuthorized(b model.Batch, authorize func(*sql.Tx) error) (model.Ack, error) {
 	ack := model.Ack{BatchID: b.BatchID, Accepted: []model.Item{}, Rejected: []model.Item{}}
 	tx, e := s.DB.Begin()
 	if e != nil {
 		return ack, e
 	}
 	defer tx.Rollback()
+	if authorize != nil {
+		if e := authorize(tx); e != nil {
+			return ack, e
+		}
+	}
 	now := time.Now().UnixMilli()
 	contextBytes, _ := json.Marshal(b.Context)
 	var existing string

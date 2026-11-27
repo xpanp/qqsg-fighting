@@ -47,6 +47,8 @@ test("confirmation retains the sampled frame timestamp", async () => {
   const env: any = {
     identity: { evidence: {} },
     identityDue: 0,
+    realm: "得陇望蜀",
+    locationConfirmed: false,
     performance: { now: () => now },
     source: {},
     recorder: {},
@@ -133,6 +135,8 @@ test("real identity RPC timeout keeps checkbox enabled and next chat tick recrea
     makeClient,
     identity: { evidence: {} },
     identityDue: 0,
+    realm: "得陇望蜀",
+    locationConfirmed: false,
     identityTracker: new IdentityTracker(),
     performance,
     source: {},

@@ -16,6 +16,9 @@ import (
 func jobTx(tx *sql.Tx, start, end int64, full bool) (string, error) {
 	id := ID()
 	_, e := tx.Exec(`INSERT INTO jobs(id,status,start_ms,end_ms,full,created_at)VALUES(?,'queued',?,?,?,?)`, id, start, end, full, time.Now().UnixMilli())
+	if e == nil {
+		_, e = tx.Exec(`INSERT INTO meta(key,value) VALUES('input_generation','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1`)
+	}
 	return id, e
 }
 
@@ -104,6 +107,10 @@ func (s *Store) process(ctx context.Context, j model.Job) error {
 	}
 	if published != c.ID {
 		j.Full = true
+	}
+	var inputGeneration int64
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='input_generation'),0)`).Scan(&inputGeneration); err != nil {
+		return err
 	}
 	var publishedAlgorithm string
 	if e = tx.QueryRow(`SELECT value FROM meta WHERE key='published_algorithm'`).Scan(&publishedAlgorithm); e != nil {
@@ -308,7 +315,11 @@ func (s *Store) process(ctx context.Context, j model.Job) error {
 	if e = tx.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key='generation'`).Scan(&currentGen); e != nil {
 		return e
 	}
-	if currentGen != gen {
+	var currentInputGeneration int64
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='input_generation'),0)`).Scan(&currentInputGeneration); err != nil {
+		return err
+	}
+	if currentGen != gen || (j.Full && currentInputGeneration != inputGeneration) {
 		_, e = tx.Exec(`UPDATE jobs SET status='queued' WHERE id=?`, j.ID)
 		if e != nil {
 			return e

@@ -13,6 +13,10 @@ import (
 // The public endpoint returns an upload-only credential; administrator routes
 // continue to require their independent HttpOnly cookie and CSRF token.
 func (s *Server) registerCollector(w http.ResponseWriter, r *http.Request) {
+	if s.accounts != nil {
+		s.accountGuard("collector", s.registerAccountCollector).ServeHTTP(w, r)
+		return
+	}
 	if !s.PublicRegistration || !s.sameOrigin(r) {
 		fail(w, http.StatusForbidden, "collector_registration_unavailable")
 		return
