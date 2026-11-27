@@ -7,7 +7,7 @@
 | [README](../README.md) | 项目是什么、如何使用、开发和部署 | 面向当前版本，保持简洁 |
 | [AGENTS](../AGENTS.md) | Agent 如何协作、测试、审查和交付 | 仓库级开发规范 |
 | [架构设计](architecture.md) | 当前系统由什么组成、模块如何协作、有哪些边界 | 反映当前实现，区分已实现与计划 |
-| [第二阶段设计](phase-2-design.md) | 文字同步、Go 后端、管理页面及服务端目录如何落地 | 待实施方案，对应 SPC-0006 |
+| [第二阶段设计](phase-2-design.md) | 文字同步、Go 后端、管理页面及服务端目录如何落地 | 第二阶段设计基线，当前状态以 SPC 为准 |
 | [SPC](spc/README.md) | 每个需求的目标、范围、任务和验收标准 | 每个需求一份，编号稳定 |
 | [ADR](adr/README.md) | 重要技术选择为什么这样做、替代方案和代价是什么 | 每个决策一份，保留决策演进 |
 | [历史任务与验证](tasks/README.md) | 过去如何实施、测过什么、还有什么未验证 | 保留证据，不冒充当前规格 |
@@ -15,6 +15,10 @@
 | [第三方资源](third-party.md) | 依赖、模型来源与许可 | 资源变化时更新 |
 
 使用标准文件名 `AGENTS.md`、`README.md`；不另建内容重复的 `agent.md`、`readme.md`。本项目的 SPC 指需求规格说明，不是要求采用某个外部标准缩写。
+
+## 当前迭代
+
+[SPC-0008：公共自动接入与来源识别](spc/0008-automatic-collector-and-source.md) 本地验证通过、待用户环境验收；决策见 [ADR-0010](adr/0010-public-collector-admission.md) 与 [ADR-0011](adr/0011-observed-source-and-sync-epochs.md)。与上一轮 [录像优先修复](spc/0007-recording-priority.md) 分开记录。代码、独立复核与本地验证已完成，尚未部署；证据见 [当次报告](tasks/2026-11-27-automatic-collector-validation.md)。
 
 ## 目录
 

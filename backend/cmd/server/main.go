@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,7 +34,20 @@ func run() error {
 	initAdmin := flag.Bool("init-admin", false, "initialize admin from QQSG_ADMIN_PASSWORD and revoke sessions")
 	backup := flag.String("backup", "", "consistent backup to an absolute new filename")
 	importNames := flag.String("import-names", "", "import name_a/name_b/name_others/aliases/blacklist directory and exit")
+	publicRegistration := flag.Bool("public-registration", true, "allow same-origin browser collector registration")
+	maxCollectors := 10
+	if value := os.Getenv("MAX_ACTIVE_COLLECTORS"); value != "" {
+		var err error
+		maxCollectors, err = strconv.Atoi(value)
+		if err != nil || maxCollectors < 1 || maxCollectors > 1000 {
+			return fmt.Errorf("MAX_ACTIVE_COLLECTORS must be 1 to 1000")
+		}
+	}
+	maxActiveCollectors := flag.Int("max-active-collectors", maxCollectors, "maximum simultaneously active upload sources (2 minute lease)")
 	flag.Parse()
+	if *maxActiveCollectors < 1 || *maxActiveCollectors > 1000 {
+		return fmt.Errorf("--max-active-collectors must be 1 to 1000")
+	}
 	if !filepath.IsAbs(*dir) {
 		return fmt.Errorf("--data-dir must be absolute")
 	}
@@ -57,6 +71,8 @@ func run() error {
 	}
 	defer s.Close()
 	api := httpapi.New(s, strings.TrimRight(*origin, "/"), *insecure)
+	api.PublicRegistration = *publicRegistration
+	api.MaxActiveCollectors = *maxActiveCollectors
 	if *initAdmin {
 		return api.InitAdmin(os.Getenv("QQSG_ADMIN_PASSWORD"))
 	}

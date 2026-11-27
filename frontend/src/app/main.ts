@@ -8,28 +8,179 @@ import { MessageMerger, messageCandidates } from "../messages/merger";
 import * as store from "../storage/journal";
 import type { Rect, MergedMessage } from "../../../contracts/types";
 import { SyncClient, type SyncSettings } from "../sync/client";
+import {
+  CollectorEnrollment,
+  enrollBrowser,
+  readCollectorCredential,
+  COLLECTOR_STORAGE_KEY,
+} from "../sync/enrollment";
+import {
+  parseCaptureIdentity,
+  IdentityTracker,
+  type CaptureIdentity,
+} from "../capture/identity";
+import { identityImages } from "../capture/identity-images";
 renderShell();
-let syncSettings: SyncSettings = { enabled: false, token: "", sourceId: "", realm: "", line: "" };
-try { const saved = JSON.parse(localStorage.getItem("qqsg-sync-settings-v2") ?? "null"); if (saved) syncSettings = { ...syncSettings, ...saved }; } catch {}
-for (const [id, key] of [["sync-source", "sourceId"], ["sync-token", "token"], ["sync-realm", "realm"], ["sync-line", "line"]] as const) $<HTMLInputElement>(id).value = syncSettings[key];
-$<HTMLInputElement>("sync-enabled").checked = syncSettings.enabled;
-const sync = new SyncClient({ settings: () => syncSettings, scan: store.messagePage, onStatus: s => setText("sync-status", `${s.detail} · 待上传 ${s.pending} 条${s.rejected ? ` · 需处理 ${s.rejected} 条` : ""}${s.lastSuccess ? ` · 最近成功 ${new Date(s.lastSuccess).toLocaleTimeString()}` : ""}`) });
-function saveSyncSettings() {
-  if (recorder && ($<HTMLInputElement>("sync-source").value.trim() !== syncSettings.sourceId || $<HTMLInputElement>("sync-realm").value.trim() !== syncSettings.realm || $<HTMLInputElement>("sync-line").value.trim() !== syncSettings.line)) {
-    setText("sync-status", "录制期间不能更改来源、区服或线路；请先停止并保存。暂停同步仍可使用。");
-    for (const [id, key] of [["sync-source", "sourceId"], ["sync-realm", "realm"], ["sync-line", "line"]] as const) $<HTMLInputElement>(id).value = syncSettings[key];
-  }
-  syncSettings = { enabled: $<HTMLInputElement>("sync-enabled").checked, token: $<HTMLInputElement>("sync-token").value.trim(), sourceId: $<HTMLInputElement>("sync-source").value.trim(), realm: $<HTMLInputElement>("sync-realm").value.trim(), line: $<HTMLInputElement>("sync-line").value.trim() };
-  try { localStorage.setItem("qqsg-sync-settings-v2", JSON.stringify(syncSettings)); } catch { setText("sync-status", "接入配置无法持久保存，本次页面仍可使用；录像继续"); }
-  sync.reset();
-  if (recorder && syncSettings.enabled) sync.authorize(recorder.sessionId, startedUtc);
-}
-$("sync-save").onclick = saveSyncSettings;
-$("sync-enabled").onchange = saveSyncSettings;
-$("sync-diagnostics").onclick = () => {
-  void sync.outbox.rows().then(rows => store.download(new Blob([JSON.stringify(rows.map(r => ({ sessionId: r.sessionId, messageId: r.message.id, revision: r.message.revision, state: r.state, reason: r.rejected })), null, 2)], { type: "application/json" }), "sync-diagnostics.json")).catch(() => setText("sync-status", "无法读取同步诊断，录像继续"));
+let syncSettings: SyncSettings = {
+  enabled: true,
+  token: "",
+  sourceId: "",
+  realm: "",
+  line: "",
 };
+try {
+  const saved = JSON.parse(
+    localStorage.getItem("qqsg-sync-settings-v2") ?? "null",
+  );
+  if (typeof saved?.token === "string" && typeof saved?.sourceId === "string")
+    syncSettings = {
+      ...syncSettings,
+      token: saved.token,
+      sourceId: saved.sourceId,
+    };
+} catch {}
+const enrollment = new CollectorEnrollment();
+let identity: CaptureIdentity = { evidence: {} };
+let identityDue = 0,
+  enrollmentDue = 0;
+let identityTracker = new IdentityTracker();
+function renderIdentity() {
+  setText(
+    "capture-identity",
+    `服务器：${identity.realm ?? "未识别"} · 线路：${identity.line ? identity.line + " 线" : "未识别"} · 角色：${identity.character ?? "未识别"}`,
+  );
+}
+const sync = new SyncClient({
+  settings: () => syncSettings,
+  scan: store.messagePage,
+  onStatus: (s) =>
+    setText(
+      "sync-status",
+      `${s.detail} · 待传 ${s.pending} 条${s.rejected ? " · 需处理 " + s.rejected + " 条" : ""}`,
+    ),
+});
+function bindIdentity(atMs = Date.now()) {
+  syncSettings = {
+    ...syncSettings,
+    realm: identity.realm ?? "",
+    line: identity.line ?? "",
+    character: identity.character,
+  };
+  if (recorder)
+    sync.bindCapture(recorder.sessionId, startedUtc, identity, atMs);
+}
+async function connectCollector() {
+  if (
+    Date.now() < enrollmentDue ||
+    (syncSettings.sourceId && syncSettings.token)
+  )
+    return;
+  try {
+    if (!recorder && !(await sync.outbox.captureIntents()).length) return;
+    if (Date.now() < enrollmentDue) return;
+    enrollmentDue = Date.now() + 60000;
+    setText("enrollment-status", "正在接入文字采集服务，本地录像继续");
+    if (!navigator.locks)
+      throw Error(
+        "浏览器暂不支持自动采集接入，请使用近期桌面Chrome或Edge；录像继续",
+      );
+    const registered = await enrollBrowser(enrollment, syncSettings, {
+      read: () => readCollectorCredential(localStorage),
+      save: (credentials) =>
+        localStorage.setItem(
+          COLLECTOR_STORAGE_KEY,
+          JSON.stringify(credentials),
+        ),
+      lock: async (name, task) => await navigator.locks.request(name, task),
+    });
+    syncSettings = { ...syncSettings, ...registered.credential, enabled: true };
+    const persistent = registered.persistent;
+    setText(
+      "enrollment-status",
+      persistent
+        ? "文字采集服务已接入"
+        : "采集标识暂不能持久保存；本次可用，下次可能重新接入，本地录像继续",
+    );
+    sync.reset();
+  } catch (e) {
+    enrollmentDue = Math.max(Date.now() + 1000, enrollment.nextAttemptAt);
+    setText("enrollment-status", describe(e) + "；约一分钟后自动重试");
+  }
+}
+async function readWindowIdentity(token: number) {
+  if (
+    performance.now() < identityDue ||
+    !source ||
+    !client ||
+    !recorder ||
+    token !== ocrGeneration ||
+    !checked("ocr-enabled")
+  )
+    return;
+  const reader = client;
+  identityDue = performance.now() + (identity.character ? 30000 : 5000);
+  try {
+    const sampledAtMs = startedUtc + performance.now() - startedMono;
+    const images = identityImages($<HTMLVideoElement>("source"));
+    const result = await reader.readIdentity(images.title, images.character);
+    if (token !== ocrGeneration) return;
+    // Track labels often stay unchanged after switching lines. Only use them
+    // before capture; current observations must come from the current image.
+    const candidate = parseCaptureIdentity({
+      titleLines: images.hasTitleBar ? [result.title] : [],
+      characterLines: [result.character],
+    });
+    const confirmed = identityTracker.observe(candidate, sampledAtMs);
+    if (confirmed.changed) {
+      identity = confirmed.identity;
+      renderIdentity();
+      bindIdentity(confirmed.sampledAtMs);
+    }
+  } catch {
+    if (token !== ocrGeneration) return;
+    identityTracker.observe(
+      { evidence: {} },
+      startedUtc + performance.now() - startedMono,
+    );
+    identityDue = performance.now() + 60000;
+    if (reader.isClosed && client === reader) client = undefined;
+    setText(
+      "capture-identity",
+      `服务器：${identity.realm ?? "未识别"} · 线路：${identity.line ? identity.line + " 线" : "未识别"} · 角色：${identity.character ?? "未识别"} · 来源识别稍后重试，聊天识别继续`,
+    );
+  }
+}
+renderIdentity();
+if (syncSettings.sourceId && syncSettings.token)
+  setText("enrollment-status", "已记住本机采集接入");
+window.addEventListener("storage", (event) => {
+  if (event.key !== COLLECTOR_STORAGE_KEY) return;
+  try {
+    const saved = readCollectorCredential(localStorage);
+    if (
+      saved &&
+      (saved.sourceId !== syncSettings.sourceId ||
+        saved.token !== syncSettings.token)
+    ) {
+      syncSettings = { ...syncSettings, ...saved, enabled: true };
+      setText("enrollment-status", "已复用本浏览器采集接入");
+      sync.reset();
+    }
+  } catch {}
+});
 sync.start();
+// Registration and recovery keep working after OCR or recording stops.
+setInterval(() => {
+  void connectCollector().catch(() =>
+    setText(
+      "enrollment-status",
+      "采集接入暂不能读取，将自动重试，本地录像继续",
+    ),
+  );
+}, 60000);
+queueMicrotask(() => {
+  void connectCollector().catch(() => {});
+});
 let folder: store.DirectoryHandle | undefined,
   source: MediaStream | undefined,
   area: Rect | undefined,
@@ -40,6 +191,8 @@ let recorder: DurableRecorder | undefined,
 let previewTimer: ReturnType<typeof setInterval> | undefined,
   ocrTimer: ReturnType<typeof setInterval> | undefined,
   elapsedTimer: ReturnType<typeof setInterval> | undefined;
+let ocrGeneration = 0;
+let preparingClient: OcrClient | undefined;
 let client: OcrClient | undefined,
   loading: Promise<void> | undefined,
   ocrBusy = false,
@@ -84,14 +237,20 @@ function controls() {
 async function loadOcr() {
   if (client) return;
   if (loading) return loading;
+  const generation = ocrGeneration;
   loading = (async () => {
     setText("ocr-status", "正在准备本机识别，首次需下载约 73 MB 模型…");
     button("prepare-ocr").disabled = true;
     $("ocr-preparation").hidden = false;
     button("retry-ocr").hidden = true;
     const next = new OcrClient({ onProgress: showOcrProgress });
+    preparingClient = next;
     try {
       const info = await next.init();
+      if (generation !== ocrGeneration) {
+        next.close();
+        return;
+      }
       client = next;
       ocrDevice = deviceName(info.provider);
       setText(
@@ -114,6 +273,7 @@ async function loadOcr() {
       next.close();
       button("prepare-ocr").disabled = false;
       setText("prepare-ocr", "重新准备识别");
+      if (generation !== ocrGeneration) return;
       setText("ocr-status", "识别准备失败，请重试；录像不受影响");
       setText("ocr-progress-detail", describe(e));
       throw e;
@@ -123,6 +283,7 @@ async function loadOcr() {
     await loading;
   } finally {
     loading = undefined;
+    preparingClient = undefined;
   }
 }
 function showOcrProgress(progress: OcrProgress) {
@@ -179,11 +340,13 @@ async function tickOcr() {
   if (!recorder || !crop || !merger || !checked("ocr-enabled") || ocrBusy)
     return;
   ocrBusy = true;
-  const token = sessionGeneration,
+  const token = ocrGeneration,
     current = merger;
   try {
+    void connectCollector();
     await loadOcr();
-    if (token !== sessionGeneration || !crop || !checked("ocr-enabled")) return;
+
+    if (token !== ocrGeneration || !crop || !checked("ocr-enabled")) return;
     const relativeMs = performance.now() - startedMono;
     const context = {
       sessionId: recorder!.sessionId,
@@ -193,7 +356,7 @@ async function tickOcr() {
     };
     const image = crop.image();
     const result = await client!.recognize(image);
-    if (token !== sessionGeneration || !checked("ocr-enabled")) return;
+    if (token !== ocrGeneration || !checked("ocr-enabled")) return;
     if (result.skipped) {
       setText("ocr-status", `${ocrDevice} · 画面未变 · 等待新消息`);
       return;
@@ -213,7 +376,7 @@ async function tickOcr() {
     for (const row of changes) sessionMessageIds.add(row.id);
     await store.saveMessages(changes);
     sync.notify(changes);
-    if (token !== sessionGeneration) return;
+    if (token !== ocrGeneration) return;
     for (const row of changes) knownMessages.set(row.id, row);
     renderMessages();
     $("ocr-preparation").hidden = true;
@@ -232,7 +395,7 @@ async function tickOcr() {
             : `已整理 ${candidates} 条候选消息，右侧已更新。`,
     );
   } catch (e) {
-    if (token !== sessionGeneration) return;
+    if (token !== ocrGeneration) return;
     client?.close();
     client = undefined;
     setText("ocr-status", "识别暂不可用，视频录制继续");
@@ -242,7 +405,11 @@ async function tickOcr() {
     notify(`文字识别：${describe(e)}。录像不受影响，可点击重试识别。`, true);
     $<HTMLInputElement>("ocr-enabled").checked = false;
   } finally {
-    ocrBusy = false;
+    try {
+      await readWindowIdentity(token);
+    } finally {
+      ocrBusy = false;
+    }
   }
 }
 function renderMessages() {
@@ -308,6 +475,12 @@ button("share").onclick = async () => {
     const next = await selectWindow();
     source?.getTracks().forEach((t) => t.stop());
     source = next;
+    identity = parseCaptureIdentity({
+      windowTitle: next.getVideoTracks()[0]?.label,
+    });
+    identityTracker = new IdentityTracker(identity);
+    identityDue = 0;
+    renderIdentity();
     area = undefined;
     const video = $<HTMLVideoElement>("source");
     video.srcObject = next;
@@ -492,7 +665,8 @@ async function start() {
       "本次文字每分钟自动保存，停止时保存最后结果",
     );
     await next.start();
-    sync.authorize(next.sessionId, startedUtc);
+    bindIdentity(startedUtc);
+    void connectCollector();
     if (token !== sessionGeneration || recorder !== next) return;
     setText("record-state", "● 正在录制");
     $("record-state").classList.add("recording");
@@ -528,6 +702,10 @@ async function stop(hasError = false) {
   clearInterval(ocrTimer);
   clearInterval(elapsedTimer);
   sessionGeneration++;
+  ocrGeneration++;
+  client?.close();
+  preparingClient?.close();
+  client = undefined;
   const current = recorder;
   recorder = undefined;
   try {
@@ -541,7 +719,7 @@ async function stop(hasError = false) {
     $("record-state").classList.remove("recording");
     if (current?.errors.length) {
       notify(
-        `录制已停止：${current.errors.at(-1)}。请检查下方片段；只有“已保存”的视频已写入目录。`,
+        `录制已停止：${current.errors[0]}。请检查下方片段；只有“已保存”的视频已写入目录。`,
         true,
       );
     } else if (current && !hasError && current.savedSegments > 0)
@@ -676,6 +854,12 @@ $<HTMLInputElement>("ocr-enabled").onchange = () => {
       : "识别已暂停，录像继续",
   );
   if (checked("ocr-enabled")) void tickOcr();
+  else {
+    ocrGeneration++;
+    client?.close();
+    preparingClient?.close();
+    client = undefined;
+  }
 };
 button("export").onclick = async () => {
   try {

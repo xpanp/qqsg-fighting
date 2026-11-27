@@ -1,0 +1,186 @@
+<!doctype html><meta charset="utf-8" /><title>本地采集验证（合成窗口）</title>
+<style>
+  body {
+    margin: 0;
+  }
+  #validation-controls {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    z-index: 99999;
+    background: #fff;
+    border: 2px solid #555;
+    padding: 8px;
+    max-width: 520px;
+  }
+  button {
+    margin: 3px;
+  }
+  #validation-status {
+    white-space: pre-wrap;
+    font: 13px monospace;
+  }
+</style>
+<div id="app"></div>
+<section id="validation-controls">
+  <b>本地验证专用 · 不会抓取桌面</b>
+  <div>
+    <button id="fixture-select">框选合成聊天区</button
+    ><button id="fixture-hang">模拟身份识别挂起</button
+    ><button id="fixture-check">检查已保存视频</button>
+  </div>
+  <div id="validation-status">
+    使用合成窗口 + OPFS测试目录；真实MediaRecorder
+  </div>
+</section>
+<script type="module">
+  const status = document.querySelector("#validation-status");
+  let directory;
+  let frame = 0,
+    workers = 0;
+  window.showDirectoryPicker = async () =>
+    (directory = await navigator.storage.getDirectory());
+  Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", {
+    value: async () => {
+      const c = document.createElement("canvas");
+      c.width = 640;
+      c.height = 480;
+      const ctx = c.getContext("2d");
+      const draw = () => {
+        ctx.fillStyle = "#154b40";
+        ctx.fillRect(0, 0, 640, 480);
+        ctx.fillStyle = "#eee";
+        ctx.fillRect(0, 0, 640, 32);
+        ctx.fillStyle = "#000";
+        ctx.font = "18px sans-serif";
+        ctx.fillText("QQ三国 得陇望蜀 12线", 25, 24);
+        ctx.fillStyle = "cyan";
+        ctx.fillText("测试角色", 175, 54);
+        ctx.fillStyle = "#000";
+        ctx.fillRect(20, 250, 600, 210);
+        ctx.fillStyle = "#ffff00";
+        ctx.font = "18px sans-serif";
+        for (let j = 0; j < 6; j++)
+          ctx.fillText(
+            "[地图] 测试甲在战斗中击败了测试乙 " + (frame + j),
+            25,
+            275 + j * 30,
+          );
+        frame++;
+      };
+      draw();
+      setInterval(draw, 100);
+      const stream = c.captureStream(10),
+        track = stream.getVideoTracks()[0],
+        original = track.getSettings.bind(track);
+      track.getSettings = () => ({ ...original(), displaySurface: "window" });
+      return stream;
+    },
+  });
+  window.Worker = class {
+    onmessage;
+    onerror;
+    dead = false;
+    constructor() {
+      workers++;
+    }
+    terminate() {
+      this.dead = true;
+    }
+    postMessage(m) {
+      if (this.dead) return;
+      if (m.type === "identity" && window.hangIdentity) return;
+      let result;
+      if (m.type === "init")
+        result = { provider: "wasm", cacheHit: true, runtimeCacheHit: true };
+      else if (m.type === "identity")
+        result = { title: "QQ三国 得陇望蜀 12线", character: "测试角色" };
+      else
+        result = {
+          provider: "wasm",
+          elapsedMs: 1,
+          lines: [
+            {
+              text: "[地图][12:00:00]测试甲在战斗中击败了测试乙",
+              box: [0, 0, 400, 20],
+              confidence: 1,
+            },
+          ],
+        };
+      queueMicrotask(() => {
+        if (!this.dead) this.onmessage?.({ data: { id: m.id, result } });
+      });
+    }
+  };
+  const errors = [];
+  window.addEventListener("error", (e) => errors.push(e.message));
+  window.addEventListener("unhandledrejection", (e) =>
+    errors.push(String(e.reason)),
+  );
+  document.querySelector("#fixture-select").onclick = () => {
+    const canvas = document.querySelector("#preview"),
+      r = canvas.getBoundingClientRect();
+    canvas.setPointerCapture = () => {};
+    const point = (x, y) => ({
+      bubbles: true,
+      clientX: r.left + (x * r.width) / canvas.width,
+      clientY: r.top + (y * r.height) / canvas.height,
+      pointerId: 1,
+      button: 0,
+    });
+    canvas.dispatchEvent(new PointerEvent("pointerdown", point(20, 250)));
+    canvas.dispatchEvent(new PointerEvent("pointermove", point(620, 460)));
+    canvas.dispatchEvent(new PointerEvent("pointerup", point(620, 460)));
+  };
+  document.querySelector("#fixture-hang").onclick = () => {
+    window.hangIdentity = true;
+    status.textContent =
+      "已挂起身份识别；约30秒内会触发本机Worker恢复，录像应持续";
+  };
+  document.querySelector("#fixture-check").onclick = async () => {
+    const files = [];
+    if (directory)
+      for await (const [name, handle] of directory.entries())
+        if (handle.kind === "file") {
+          const f = await handle.getFile();
+          const info = { name, size: f.size };
+          if (name.endsWith(".webm")) {
+            info.magic = Array.from(
+              new Uint8Array(await f.slice(0, 4).arrayBuffer()),
+            )
+              .map((n) => n.toString(16).padStart(2, "0"))
+              .join("");
+            const v = document.createElement("video"),
+              url = URL.createObjectURL(f);
+            try {
+              await new Promise((resolve, reject) => {
+                const timer = setTimeout(
+                  () => reject(Error("metadata timeout")),
+                  3000,
+                );
+                v.onloadedmetadata = () => {
+                  clearTimeout(timer);
+                  resolve();
+                };
+                v.onerror = () => {
+                  clearTimeout(timer);
+                  reject(Error("decode failed"));
+                };
+                v.src = url;
+              });
+              info.width = v.videoWidth;
+              info.height = v.videoHeight;
+            } catch (e) {
+              info.decodeError = String(e);
+            } finally {
+              v.removeAttribute("src");
+              v.load();
+              URL.revokeObjectURL(url);
+            }
+          }
+          files.push(info);
+        }
+    status.textContent = JSON.stringify({ files, workers, errors }, null, 2);
+  };
+  await import("/fighting/src/app/main.ts");
+</script>

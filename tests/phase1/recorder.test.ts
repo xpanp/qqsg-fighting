@@ -166,7 +166,7 @@ test("stop during pending segment creation prevents a new media recorder", async
   );
 });
 
-test("segment rollover starts successor before stopping predecessor and stops all on request", async () => {
+test("segment rollover continues automatically and stops all on request", async () => {
   globalThis.MediaRecorder = FakeRecorder as any;
   const f = fixture({ segmentSeconds: 0.02 });
   await f.recorder.start();
@@ -231,4 +231,19 @@ test("missing recorder start event times out and permits cleanup", async () => {
     f.media.every((media) => media.state === "inactive"),
     true,
   );
+});
+
+test("unexpected encoder stop is reported while preserving its healthy cached video", async () => {
+  globalThis.MediaRecorder = FakeRecorder as any;
+  const f = fixture();
+  await f.recorder.start();
+  f.media[0].chunk();
+  f.media[0].state = "inactive";
+  f.media[0].onstop?.();
+  await settle(f.recorder.stop());
+  assert.ok(
+    f.recorder.errors.some((s) => s.includes("unexpected-encoder-stop")),
+  );
+  assert.equal(f.recorder.savedSegments, 1);
+  assert.ok(f.events.some((e) => e.event === "error"));
 });

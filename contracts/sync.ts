@@ -4,6 +4,7 @@ export interface SyncContext {
   sessionStartedAtMs: number;
   realm: string;
   line: string;
+  character?: string;
   clockOffsetMs?: number;
   clockUncertaintyMs?: number;
 }

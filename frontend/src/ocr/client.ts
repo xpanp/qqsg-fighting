@@ -28,6 +28,7 @@ interface ClientOptions {
   onProgress?: (progress: OcrProgress) => void;
   initTimeoutMs?: number;
   inferenceTimeoutMs?: number;
+  identityTimeoutMs?: number;
 }
 export class OcrClient {
   private worker: Worker;
@@ -86,18 +87,28 @@ export class OcrClient {
       ms,
     );
   }
-  call<T = any>(type: string, args: object = {}): Promise<T> {
+  call<T = any>(
+    type: string,
+    args: object = {},
+    transfer: Transferable[] = [],
+    deadlineMs?: number,
+  ): Promise<T> {
     if (this.closed) return Promise.reject(Error("识别进程已停止"));
     const id = ++this.sequence;
     const initializing = type === "init";
-    const timeoutMs = initializing
-      ? (this.options.initTimeoutMs ?? 600000)
-      : (this.options.inferenceTimeoutMs ?? 180000);
+    const timeoutMs =
+      deadlineMs ??
+      (initializing
+        ? (this.options.initTimeoutMs ?? 600000)
+        : (this.options.inferenceTimeoutMs ?? 180000));
     return new Promise((resolve, reject) => {
       const timer = this.timeout(timeoutMs);
       this.pending.set(id, { resolve, reject, timer, timeoutMs, initializing });
       try {
-        this.worker.postMessage({ id, type, baseUrl: this.baseUrl, ...args });
+        this.worker.postMessage(
+          { id, type, baseUrl: this.baseUrl, ...args },
+          transfer,
+        );
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -109,7 +120,20 @@ export class OcrClient {
     return this.call<OcrInfo>("init");
   }
   recognize(image: ImageData) {
-    return this.call<OcrResult>("stream-frame", { image });
+    return this.call<OcrResult>("stream-frame", { image }, [
+      image.data.buffer as ArrayBuffer,
+    ]);
+  }
+  readIdentity(title: ImageData, character: ImageData) {
+    return this.call<{ title: string; character: string }>(
+      "identity",
+      { title, character },
+      [title.data.buffer as ArrayBuffer, character.data.buffer as ArrayBuffer],
+      this.options.identityTimeoutMs ?? 5000,
+    );
+  }
+  get isClosed() {
+    return this.closed;
   }
   close(reason = Error("识别已停止")) {
     this.closed = true;

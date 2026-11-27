@@ -27,13 +27,17 @@ const Prefix = "/fighting/api/v1/"
 const cookieName = "qqsg_admin"
 
 type Server struct {
-	Store         *store.Store
-	Origin        string
-	InsecureLocal bool
-	Log           *slog.Logger
-	mu            sync.Mutex
-	limits        map[string]*bucket
-	streams       int
+	Store               *store.Store
+	Origin              string
+	InsecureLocal       bool
+	Log                 *slog.Logger
+	mu                  sync.Mutex
+	limits              map[string]*bucket
+	streams             int
+	PublicRegistration  bool
+	RegistrationLimit   int
+	MaxActiveCollectors int
+	activeCollectors    map[string]time.Time
 }
 type bucket struct {
 	count int
@@ -41,7 +45,7 @@ type bucket struct {
 }
 
 func New(s *store.Store, origin string, insecure bool) *Server {
-	return &Server{Store: s, Origin: strings.TrimRight(origin, "/"), InsecureLocal: insecure, Log: slog.Default(), limits: map[string]*bucket{}}
+	return &Server{Store: s, Origin: strings.TrimRight(origin, "/"), InsecureLocal: insecure, Log: slog.Default(), limits: map[string]*bucket{}, PublicRegistration: true, RegistrationLimit: 1000, MaxActiveCollectors: 10, activeCollectors: map[string]time.Time{}}
 }
 func (s *Server) InitAdmin(password string) error {
 	if len(password) < 12 || len(password) > 72 {
@@ -67,6 +71,7 @@ func (s *Server) InitAdmin(password string) error {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+Prefix+"collectors/register", s.registerCollector)
 	mux.HandleFunc("POST "+Prefix+"ingest/batches", s.ingest)
 	mux.HandleFunc("GET "+Prefix+"time", s.clock)
 	mux.HandleFunc("POST "+Prefix+"admin/login", s.login)
@@ -284,9 +289,25 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) clock(w http.ResponseWriter, r *http.Request) {
-	if _, e := s.authSource(r); e != nil {
+	// Bound unauthenticated traffic before querying credentials. The admission
+	// lease below caps active sources, not request volume from one source.
+	if !s.allowed("clock-global", 600, time.Minute) || !s.allowed("clock-ip:"+s.clientIP(r), 120, time.Minute) {
+		w.Header().Set("Retry-After", "60")
+		fail(w, 429, "clock_rate_limited")
+		return
+	}
+	if source, e := s.authSource(r); e != nil {
 		if _, e = s.getAdmin(r); e != nil {
 			fail(w, 401, "credential required")
+			return
+		}
+	} else {
+		if !s.allowed("clock-source:"+source, 60, time.Minute) {
+			w.Header().Set("Retry-After", "60")
+			fail(w, 429, "clock_rate_limited")
+			return
+		}
+		if !s.collectorLease(w, source) {
 			return
 		}
 	}
@@ -298,6 +319,14 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "invalid collector credential")
 		return
 	}
+	if !s.collectorLease(w, source) {
+		return
+	}
+	if !s.allowed("ingest-ip:"+s.clientIP(r), 240, time.Minute) || !s.allowed("ingest-global", 600, time.Minute) {
+		w.Header().Set("Retry-After", "60")
+		fail(w, 429, "upload_rate_limited")
+		return
+	}
 	if !s.allowed("ingest:"+source, 120, time.Minute) {
 		fail(w, 429, "rate limited")
 		return
@@ -306,7 +335,7 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &b, 1<<20) {
 		return
 	}
-	if b.SchemaVersion != 2 || b.BatchID == "" || len(b.BatchID) > 160 || b.SourceID != source || b.SessionID == "" || len(b.SessionID) > 160 || len(b.Messages) == 0 || len(b.Messages) > 100 || len(b.Context.Realm) > 120 || len(b.Context.Line) > 120 || math.IsNaN(b.Context.ClockOffsetMs) || math.IsNaN(b.Context.ClockUncertaintyMs) || math.Abs(b.Context.ClockOffsetMs) > 86400000 || b.Context.ClockUncertaintyMs < 0 || b.Context.ClockUncertaintyMs > 86400000 {
+	if b.SchemaVersion != 2 || b.BatchID == "" || len(b.BatchID) > 160 || b.SourceID != source || b.SessionID == "" || len(b.SessionID) > 160 || len(b.Messages) == 0 || len(b.Messages) > 100 || len(b.Context.Realm) > 120 || len(b.Context.Line) > 120 || len(b.Context.Character) > 120 || math.IsNaN(b.Context.ClockOffsetMs) || math.IsNaN(b.Context.ClockUncertaintyMs) || math.Abs(b.Context.ClockOffsetMs) > 86400000 || b.Context.ClockUncertaintyMs < 0 || b.Context.ClockUncertaintyMs > 86400000 {
 		fail(w, 400, "invalid batch or source")
 		return
 	}
@@ -478,6 +507,9 @@ func (s *Server) collector(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, "source not found")
 			return
 		}
+		s.mu.Lock()
+		delete(s.activeCollectors, b.SourceID)
+		s.mu.Unlock()
 		jsonOut(w, 200, map[string]any{"sourceId": b.SourceID, "revoked": true})
 		return
 	}

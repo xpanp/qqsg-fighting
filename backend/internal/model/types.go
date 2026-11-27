@@ -4,6 +4,7 @@ type Context struct {
 	SessionStartedAtMs int64   `json:"sessionStartedAtMs"`
 	Realm              string  `json:"realm"`
 	Line               string  `json:"line"`
+	Character          string  `json:"character,omitempty"`
 	ClockOffsetMs      float64 `json:"clockOffsetMs"`
 	ClockUncertaintyMs float64 `json:"clockUncertaintyMs"`
 }

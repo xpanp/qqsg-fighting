@@ -194,6 +194,15 @@ self.onmessage = async ({ data: m }) => {
       self.postMessage({ id: m.id, result: { ...result, provider } });
       return;
     }
+    if (m.type === "identity") {
+      const title = await recognize(tensorInput(m.title));
+      const character = await recognize(tensorInput(m.character));
+      self.postMessage({
+        id: m.id,
+        result: { title: title.text, character: character.text },
+      });
+      return;
+    }
     if (m.type === "stream-frame") {
       const now = performance.now(),
         sig = signature(m.image),

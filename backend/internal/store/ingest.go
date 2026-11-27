@@ -26,7 +26,7 @@ func (s *Store) Ingest(b model.Batch) (model.Ack, error) {
 	} else if e == nil {
 		var c model.Context
 		_ = json.Unmarshal([]byte(existing), &c)
-		if c.Realm != b.Context.Realm || c.Line != b.Context.Line || c.SessionStartedAtMs != b.Context.SessionStartedAtMs {
+		if c.Realm != b.Context.Realm || c.Line != b.Context.Line || c.Character != b.Context.Character || c.SessionStartedAtMs != b.Context.SessionStartedAtMs {
 			return ack, fmt.Errorf("session_context_conflict")
 		}
 	}

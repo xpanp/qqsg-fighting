@@ -1,6 +1,6 @@
 # 第二阶段运行与部署检查
 
-更新：2026-11-25。代码已用于本地隔离验证；本文件不是现网已部署的证据。现网仍使用第一阶段静态布局，未经迁移不能直接替换 Nginx snippet。
+更新：2026-11-27。本文件是运行与发布规范，不是现网版本证明。第二阶段已有历史部署记录；本轮SPC-0008自动接入尚未部署，不能用本地构建代替发布回执。
 
 本地阶段结束后，用户于同日追加授权部署。新入口 `scripts/deploy-phase2.ps1` 要求干净受审提交，构建并打包 web/bin、私有上传、初始化单 admin、以旧绝对 web root 桥接布局迁移，再健康检查切换。首次凭据只保存在本地 `.tools/deployment/admin-credentials.txt`，不进入 Git；实际发布回执按 commit 放在 `.tools/deployment` 及服务器 release 的 `deployment.txt`。
 
@@ -74,3 +74,11 @@ node tests/phase2/browser-smoke.mjs --binary .tools/qqsg-server-test.exe
 恢复时停止服务，在独立目录验证备份（测试已覆盖），再切换数据目录；旧 DB/WAL/SHM 整组保留，不混用不同版本文件。初始化 schema 为 1，遇更高未知版本拒绝启动，后续正式迁移必须新编号而不是改已发布 SQL。程序回滚与数据库恢复分开，不能忽略恢复点之后的新数据。
 
 事件查询 SQL 分页；统计/Excel 单次最多 31 天、20,000 个事件或 32 MiB 事件 JSON，超出要求缩小区间，查询限时 3 秒。单服务、单 worker，未做分布式吞吐承诺。admin SSE 有并发/写入超时边界，日志包含 request/batch/source/session/job/config/projection 标识，不记录密码、令牌或完整聊天。Nginx 必须覆盖 `X-Real-IP`；Go 仅在生产 loopback 代理连接上信任合法的该字段。
+
+## 自动接入版本的本地验收
+
+SPC-0008移除普通页凭据配置及同步开关，开始录制后自动申请本浏览器只写接入；简短上传告知保留。`--public-registration=false`可关闭新注册；默认最多10个最近两分钟活跃来源，`MAX_ACTIVE_COLLECTORS`或`--max-active-collectors`可调整。满额遵守Retry-After，不阻录像。角色只作观察来源，不是登录用户。
+
+新增`context.character`为可选字段，严格旧后端可能拒绝未知字段，发布时先部署兼容后端再发布前端，不同时切换到不兼容旧二进制。SQLite未新增版本；浏览器同步IndexedDB升级到v3保留旧队列，录像库不升级。回滚前保留本地缓存，不能要求用户清站点数据来恢复录像。
+
+可执行 `node tests/phase2/serve-browser-fixture.mjs --binary .tools/qqsg-server-test.exe` 启动独立测试服务，访问终端输出地址。合成窗口/OPFS/替代OCR用于验证真实浏览器编码和保存；不等于实际游戏窗口及磁盘目录授权。端口18782/18783须空闲，程序不会停止已有进程。生产构建不包含测试页面。结果见[本轮记录](../docs/tasks/2026-11-27-automatic-collector-validation.md)。

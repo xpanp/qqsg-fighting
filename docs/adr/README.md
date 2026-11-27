@@ -12,6 +12,9 @@
 | [ADR-0006](0006-durable-message-sync.md) | 独立持久队列、修订幂等与时间证据 | 已采纳，本地实现/验证 | SPC-0006 |
 | [ADR-0007](0007-server-processing-and-admin.md) | Go 单服务、可重算数据与管理鉴权 | 已采纳，本地实现/验证 | SPC-0006 |
 | [ADR-0008](0008-business-event-identity.md) | 业务事件身份、同源重复与人工关联证据分离 | 已采纳，实施中真实回放与 Review | SPC-0006 |
+| [ADR-0009](0009-recorder-resource-isolation.md) | 分段编码器串行切换与录像优先 | 已采纳，本地未部署 | SPC-0007 |
+| [ADR-0010](0010-public-collector-admission.md) | 公共访客接入与活跃来源限额 | 已采纳，本地验证通过，未部署 | SPC-0008 |
+| [ADR-0011](0011-observed-source-and-sync-epochs.md) | 观测来源与同步逻辑会话 | 已采纳，本地验证通过，未部署 | SPC-0008 |
 
 编号递增，不因文件删除、拒绝或方案被取代而重用。新 ADR 说明背景、选项、结论、后果及如何验证；不要只记录最终方案。改变已采纳决策时新建记录，链接 `取代/被取代` 关系，并同步当前架构文档。小修复可以没有新 ADR，只需在 SPC 关联沿用的决策。
 
